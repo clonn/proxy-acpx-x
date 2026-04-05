@@ -1,18 +1,29 @@
 # proxy-acpx-x
 
-ACP ↔ Claude Code `stream-json` adapter. Routes OpenClaw/acpx traffic through the **Claude Code CLI**, enabling subscription-based authentication instead of requiring a separate API key.
+ACP adapters for routing OpenClaw/acpx traffic through **Claude Code CLI** or **Codex CLI**, enabling subscription-based authentication instead of requiring separate API keys.
+
+## Supported Backends
+
+| Backend | Command | CLI Used |
+|---------|---------|----------|
+| **Claude Code** | `proxy-acpx-x` | `claude -p --input-format stream-json --output-format stream-json` |
+| **Codex CLI** | `proxy-acpx-x-codex` | `codex exec --json --full-auto` |
 
 ## Architecture
 
 ```
-Before (API key required):
-  OpenClaw → acpx → @zed/claude-agent-acp → Anthropic API (API key)
+Claude Code backend:
+  OpenClaw → acpx → proxy-acpx-x       → claude CLI (stream-json) → Anthropic API
 
-After (subscription auth via CLI):
-  OpenClaw → acpx → proxy-acpx-x → claude CLI (stream-json) → Anthropic API (subscription OK)
+Codex CLI backend:
+  OpenClaw → acpx → proxy-acpx-x-codex → codex exec (JSON Lines)  → OpenAI API
 ```
 
-The adapter is a thin NDJSON translator (~300 lines) that sits between acpx and the Claude Code CLI. Both protocols use stdin/stdout NDJSON, so only field-name mapping is needed.
+Both adapters are thin NDJSON translators. The ACP side is identical — only the CLI protocol differs.
+
+---
+
+## Claude Code Adapter
 
 ### Protocol Mapping
 
@@ -34,7 +45,7 @@ The adapter is a thin NDJSON translator (~300 lines) that sits between acpx and 
 | `{ type: "result", subtype: "success" }`                                        | prompt response (stopReason: end_turn) |
 | `{ type: "system", subtype: "api_retry" }`                                     | logged to stderr                 |
 
-### CLI Flags Used
+### CLI Flags
 
 ```bash
 claude -p \
@@ -58,16 +69,61 @@ claude -p \
 
 Reference: [Claude Code headless docs](https://code.claude.com/docs/en/headless)
 
+---
+
+## Codex CLI Adapter
+
+### Protocol Mapping
+
+**Input: ACP → Codex CLI** (spawns `codex exec` per prompt)
+
+| ACP (from acpx)                           | Codex CLI                                  |
+| ----------------------------------------- | ------------------------------------------ |
+| `session/prompt { prompt: [{text:"…"}] }` | `codex exec --json --full-auto "…"`        |
+| `session/prompt` (2nd+)                   | `codex exec resume --last --json "…"`      |
+| `session/cancel`                          | SIGTERM to child process                   |
+| `session/close`                           | SIGTERM + reset session                    |
+
+**Output: Codex CLI JSON Lines → ACP**
+
+| Codex exec event                                          | ACP (to acpx)                    |
+| --------------------------------------------------------- | -------------------------------- |
+| `item.created { item: { type: "message", content } }`    | `session/update { agent_message_chunk }` |
+| `item.created { item: { type: "tool_use" } }`            | `session/update { tool_call }`   |
+| `item.created { item: { type: "tool_result" } }`         | `session/update { tool_result }` |
+| `turn.completed { usage }`                                | prompt response (stopReason: end_turn) |
+| `turn.failed { error }`                                   | prompt response (stopReason: error) |
+| `thread.started { session_id }`                           | captured for session resume      |
+
+### CLI Flags
+
+```bash
+codex exec --json --full-auto "<prompt>"
+codex exec resume --last --json --full-auto "<follow-up>"
+```
+
+| Flag | Purpose |
+| ---- | ------- |
+| `exec` | Non-interactive mode |
+| `--json` | JSON Lines output for machine parsing |
+| `--full-auto` | Auto-approve reads, writes, and commands (sandboxed) |
+| `resume --last` | Continue previous session for multi-turn |
+
+Reference: [Codex CLI docs](https://developers.openai.com/codex/cli)
+
+---
+
 ## Prerequisites
 
 - **Node.js** >= 18
-- **Claude Code CLI** installed and authenticated (`claude` command in PATH)
+- **Claude Code CLI** (`claude` in PATH) — for Claude adapter
+- **Codex CLI** (`codex` in PATH) — for Codex adapter
 - **OpenClaw** with acpx plugin
 
 ## Installation
 
 ```bash
-# From npm (once published)
+# From npm
 npm install -g proxy-acpx-x
 
 # Or from source
@@ -79,17 +135,19 @@ npm run build
 
 ## Setup with OpenClaw / acpx
 
-### Option 1: Register as an acpx agent
+### Claude Code backend
 
 ```bash
-# If installed globally
 acpx config set agents.claude-native.command "proxy-acpx-x"
-
-# If running from source
-acpx config set agents.claude-native.command "node /path/to/proxy-acpx-x/dist/adapter.js"
 ```
 
-Then edit `~/.openclaw/config.json`:
+### Codex CLI backend
+
+```bash
+acpx config set agents.codex-native.command "proxy-acpx-x-codex"
+```
+
+### OpenClaw config (`~/.openclaw/config.json`)
 
 ```json
 {
@@ -102,25 +160,30 @@ Then edit `~/.openclaw/config.json`:
 }
 ```
 
-### Option 2: Direct execution (testing)
+Change `defaultAgent` to `"codex-native"` to use Codex by default.
+
+### Direct execution (testing)
 
 ```bash
-# Pipe ACP messages manually
+# Claude adapter
 echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | node dist/adapter.js
+
+# Codex adapter
+echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | node dist/codex-adapter.js
 ```
 
 ## Usage
 
 Once configured, OpenClaw routes requests through the adapter automatically:
 
-**Direct conversation:**
 ```
-You: "Refactor this function using Claude Code"
+You: "Refactor this function"
 ```
 
 **Manual spawn:**
 ```
 /acp spawn claude-native --mode persistent --thread auto
+/acp spawn codex-native --mode persistent --thread auto
 ```
 
 **Common commands:**
@@ -137,94 +200,57 @@ You: "Refactor this function using Claude Code"
 ```bash
 npm install          # Install dependencies
 npm run build        # Compile TypeScript → dist/
-npm run dev          # Run directly with ts-node
+npm run dev          # Run Claude adapter with ts-node
 ```
 
 ## Testing
 
 ```bash
-npm test             # Run unit tests (vitest, 24 tests)
+npm test             # Run all unit tests (vitest, 40 tests)
 npm run test:watch   # Run tests in watch mode
-npm run test:smoke   # Run E2E smoke tests against built adapter
+npm run test:smoke   # Run E2E smoke tests against Claude adapter
 ```
 
-**Unit tests** (`test/protocol.test.ts`) — test all pure protocol translation functions:
-- ACP ↔ stream-json message building
-- Tool classification, input extraction, summarization
-- CLI argument construction
+**Unit tests:**
+- `test/protocol.test.ts` — 24 tests for ACP ↔ Claude Code stream-json translation
+- `test/codex-protocol.test.ts` — 16 tests for ACP ↔ Codex CLI translation
 
-**Smoke tests** (`test/smoke.sh`) — test the actual adapter process:
-- ACP `initialize` handshake
-- `session/create` with custom session ID
-- Empty prompt returns `end_turn` immediately
-- Unknown method returns JSON-RPC error
-- `session/close` graceful shutdown
+**Smoke tests** (`test/smoke.sh`) — 5 tests against the built Claude adapter process.
 
-### Manual E2E test (with real Claude CLI)
+### Manual E2E test
 
 ```bash
-# 1. Build
 npm run build
 
-# 2. Start the adapter
+# Claude adapter
 node dist/adapter.js
+# paste: {"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}
+# paste: {"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"What is 2+2?"}]}}
 
-# 3. In the same terminal, paste these lines one by one:
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}
-{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"What is 2+2? Reply with just the number."}]}}
-
-# 4. Watch stdout for ACP responses and stderr for debug logs
-# 5. Ctrl+C to stop
+# Codex adapter
+node dist/codex-adapter.js
+# paste: {"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}
+# paste: {"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"What is 2+2?"}]}}
 ```
-
-## How It Works
-
-The adapter has 4 parts:
-
-### Part 1: CLI Spawn (~20 lines)
-Starts `claude` as a child process with stream-json I/O flags. Uses `--bare` for fast startup and `--include-partial-messages` for real-time streaming events.
-
-### Part 2: ACP → stream-json (~60 lines)
-Reads NDJSON from stdin (ACP messages from acpx). Translates:
-- `initialize` → spawn Claude CLI, return capabilities
-- `session/prompt` → `{"type":"user","message":{"role":"user","content":"…"}}` to Claude's stdin
-- `session/cancel` → SIGTERM the Claude process
-- `session/close` → graceful stdin close + SIGTERM
-
-### Part 3: stream-json → ACP (~120 lines)
-Reads Claude's stdout stream events and translates:
-- `stream_event` with `content_block_delta` (`text_delta`) → `session/update { agent_message_chunk }`
-- `stream_event` with `content_block_start` (`tool_use`) → track tool name/id
-- `stream_event` with `content_block_delta` (`input_json_delta`) → accumulate tool input
-- `stream_event` with `content_block_stop` → emit `session/update { tool_call }` with complete input
-- `result` → ACP prompt response with stop reason and usage stats
-- `system` (`api_retry`) → logged to stderr
-
-### Part 4: Utilities (~30 lines)
-JSON emitters (`emitAcp`, `emitAcpResponse`, `emitAcpNotification`), prompt text extraction, input summarization, tool classification.
-
-## Permission Handling
-
-This adapter uses **Method A: pre-approved permissions** (`--permission-mode bypassPermissions`). ACP sessions are non-interactive, so all file writes and command executions are auto-approved.
-
-For dynamic permission control (Method B), integrate the [Claude Agent SDK](https://platform.claude.com/docs/en/agent-sdk/overview)'s `permissionHandler` callback — see [concept.md](./concept.md) for details.
 
 ## Troubleshooting
 
-**"Failed to spawn claude"** — Ensure `claude` CLI is in your PATH. Run `which claude` to verify.
+**"Failed to spawn claude/codex"** — Ensure the CLI is in your PATH. Run `which claude` or `which codex`.
 
-**No output from Claude** — Check stderr logs (lines prefixed `[proxy-acpx-x]`). The adapter logs all lifecycle events to stderr.
+**No output** — Check stderr logs (prefixed `[proxy-acpx-x]` or `[proxy-acpx-x:codex]`).
 
-**Permission errors** — The adapter runs with `bypassPermissions`. For finer control, modify the spawn args to use `--allowedTools` instead.
+**Permission errors** — Claude adapter uses `bypassPermissions`, Codex adapter uses `--full-auto`. For finer control, modify the spawn args.
 
-**Slow startup** — The adapter uses `--bare` to skip hooks/plugins/MCP discovery. If you need project context (CLAUDE.md, etc.), remove `--bare` from the spawn args.
+**Slow startup (Claude)** — Uses `--bare` to skip hooks/plugins. Remove if you need CLAUDE.md context.
 
 ## References
 
 - [Claude Code headless mode](https://code.claude.com/docs/en/headless)
 - [Agent SDK streaming output](https://platform.claude.com/docs/en/agent-sdk/streaming-output)
 - [Agent SDK streaming input](https://platform.claude.com/docs/en/agent-sdk/streaming-vs-single-mode)
-- [Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference)
+- [Codex CLI features](https://developers.openai.com/codex/cli/features)
+- [Codex CLI reference](https://developers.openai.com/codex/cli/reference)
+- [Codex non-interactive mode](https://developers.openai.com/codex/noninteractive)
 
 ## License
 

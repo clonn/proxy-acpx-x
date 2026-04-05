@@ -5,7 +5,8 @@
   "main": "dist/adapter.js",
   "types": "dist/adapter.d.ts",
   "bin": {
-    "proxy-acpx-x": "dist/adapter.js"
+    "proxy-acpx-x": "dist/adapter.js",
+    "proxy-acpx-x-codex": "dist/codex-adapter.js"
   },
   "files": [
     "dist",
