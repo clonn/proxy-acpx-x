@@ -1,0 +1,37 @@
+{
+  "name": "proxy-acpx-x",
+  "version": "1.0.0",
+  "description": "ACP ↔ Claude Code stream-json adapter — use Claude Code CLI subscription auth with OpenClaw/acpx",
+  "main": "dist/adapter.js",
+  "bin": {
+    "proxy-acpx-x": "dist/adapter.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/adapter.js",
+    "dev": "ts-node src/adapter.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:smoke": "bash test/smoke.sh"
+  },
+  "keywords": [
+    "claude-code",
+    "acp",
+    "acpx",
+    "openclaw",
+    "adapter",
+    "proxy",
+    "stream-json"
+  ],
+  "author": "Caesar Chi",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "ts-node": "^10.9.0",
+    "typescript": "^5.3.0",
+    "vitest": "^3.2.4"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
