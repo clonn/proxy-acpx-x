@@ -1,170 +1,33 @@
 # proxy-acpx-x
 
-ACP adapters for routing OpenClaw/acpx traffic through **Claude Code CLI**, **Codex CLI**, or **Gemini CLI**, enabling subscription-based authentication instead of requiring separate API keys.
+[![npm version](https://img.shields.io/npm/v/proxy-acpx-x.svg)](https://www.npmjs.com/package/proxy-acpx-x)
+
+ACP adapters and OpenAI-compatible HTTP proxy for routing traffic through **Claude Code CLI**, **Codex CLI**, or **Gemini CLI** — use your existing CLI subscription auth instead of separate API keys.
 
 ## Supported Backends
 
-| Backend | Command | CLI Used |
-|---------|---------|----------|
-| **Claude Code** | `proxy-acpx-claude` | `claude -p --input-format stream-json --output-format stream-json` |
-| **Codex CLI** | `proxy-acpx-codex` | `codex exec --json --full-auto` |
-| **Gemini CLI** | `proxy-acpx-gemini` | `gemini --output-format stream-json --yolo` |
+| Backend | ACP Adapter | HTTP Server | CLI Used |
+|---------|-------------|-------------|----------|
+| **Claude Code** | `proxy-acpx-claude` | `proxy-acpx-server` | `claude` |
+| **Codex CLI** | `proxy-acpx-codex` | — | `codex` |
+| **Gemini CLI** | `proxy-acpx-gemini` | — | `gemini` |
 
 ## Architecture
 
 ```
-Claude Code backend:
-  OpenClaw → acpx → proxy-acpx-claude → claude CLI (stream-json) → Anthropic API
+HTTP Server mode (recommended for OpenClaw model provider):
+  OpenClaw → POST /v1/chat/completions → proxy-acpx-server → claude CLI → Anthropic API
+                                          (port 52088)
 
-Codex CLI backend:
-  OpenClaw → acpx → proxy-acpx-codex  → codex exec (JSON Lines)  → OpenAI API
-
-Gemini CLI backend:
-  OpenClaw → acpx → proxy-acpx-gemini → gemini CLI (stream-json) → Google AI API
+ACP Adapter mode:
+  OpenClaw → openclaw acp client → proxy-acpx-claude → claude CLI → Anthropic API
+  OpenClaw → openclaw acp client → proxy-acpx-codex  → codex CLI  → OpenAI API
+  OpenClaw → openclaw acp client → proxy-acpx-gemini → gemini CLI → Google AI API
 ```
 
-All adapters are thin NDJSON translators. The ACP side is identical — only the CLI protocol differs.
-
-> **Naming:** `proxy-acpx-x` where `x` is the target CLI — `proxy-acpx-claude`, `proxy-acpx-codex`, `proxy-acpx-gemini`, etc.
+> **Naming:** `proxy-acpx-x` where `x` is the target CLI — `proxy-acpx-claude`, `proxy-acpx-codex`, `proxy-acpx-gemini`.
 
 ---
-
-## Claude Code Adapter
-
-### Protocol Mapping
-
-**Input: ACP → Claude Code CLI stdin** (`--input-format stream-json`)
-
-| ACP (from acpx)                           | Claude Code stream-json stdin                                       |
-| ----------------------------------------- | ------------------------------------------------------------------- |
-| `session/prompt { prompt: [{text:"…"}] }` | `{"type":"user","message":{"role":"user","content":"…"}}`           |
-| `session/cancel`                          | SIGTERM to child process                                            |
-| `session/close`                           | Close stdin + SIGTERM                                               |
-
-**Output: Claude Code CLI stdout → ACP** (`--output-format stream-json`)
-
-| Claude Code stream-json stdout                                                  | ACP (to acpx)                    |
-| ------------------------------------------------------------------------------- | -------------------------------- |
-| `stream_event { event: { type: "content_block_delta", delta: { text } } }`      | `session/update { agent_message_chunk }` |
-| `stream_event { event: { type: "content_block_start", content_block: { type: "tool_use" } } }` | (tracked internally)   |
-| `stream_event { event: { type: "content_block_stop" } }` (after tool_use)      | `session/update { tool_call }`   |
-| `{ type: "result", subtype: "success" }`                                        | prompt response (stopReason: end_turn) |
-| `{ type: "system", subtype: "api_retry" }`                                     | logged to stderr                 |
-
-### CLI Flags
-
-```bash
-claude -p \
-  --input-format stream-json \
-  --output-format stream-json \
-  --verbose \
-  --include-partial-messages \
-  --permission-mode bypassPermissions
-```
-
-| Flag | Purpose |
-| ---- | ------- |
-| `-p` | Non-interactive (print) mode |
-| `--input-format stream-json` | Accept NDJSON messages on stdin |
-| `--output-format stream-json` | Emit NDJSON streaming events on stdout |
-| `--verbose` | Full turn-by-turn output |
-| `--include-partial-messages` | Emit `stream_event` with real-time text/tool deltas |
-| `--permission-mode bypassPermissions` | Auto-approve all tools (required for non-interactive ACP) |
-
-Reference: [Claude Code headless docs](https://code.claude.com/docs/en/headless)
-
----
-
-## Codex CLI Adapter
-
-### Protocol Mapping
-
-**Input: ACP → Codex CLI** (spawns `codex exec` per prompt)
-
-| ACP (from acpx)                           | Codex CLI                                  |
-| ----------------------------------------- | ------------------------------------------ |
-| `session/prompt { prompt: [{text:"…"}] }` | `codex exec --json --full-auto "…"`        |
-| `session/prompt` (2nd+)                   | `codex exec resume --last --json "…"`      |
-| `session/cancel`                          | SIGTERM to child process                   |
-| `session/close`                           | SIGTERM + reset session                    |
-
-**Output: Codex CLI JSON Lines → ACP**
-
-| Codex exec event                                          | ACP (to acpx)                    |
-| --------------------------------------------------------- | -------------------------------- |
-| `item.created { item: { type: "message", content } }`    | `session/update { agent_message_chunk }` |
-| `item.created { item: { type: "tool_use" } }`            | `session/update { tool_call }`   |
-| `item.created { item: { type: "tool_result" } }`         | `session/update { tool_result }` |
-| `turn.completed { usage }`                                | prompt response (stopReason: end_turn) |
-| `turn.failed { error }`                                   | prompt response (stopReason: error) |
-| `thread.started { session_id }`                           | captured for session resume      |
-
-### CLI Flags
-
-```bash
-codex exec --json --full-auto "<prompt>"
-codex exec resume --last --json --full-auto "<follow-up>"
-```
-
-| Flag | Purpose |
-| ---- | ------- |
-| `exec` | Non-interactive mode |
-| `--json` | JSON Lines output for machine parsing |
-| `--full-auto` | Auto-approve reads, writes, and commands (sandboxed) |
-| `resume --last` | Continue previous session for multi-turn |
-
-Reference: [Codex CLI docs](https://developers.openai.com/codex/cli)
-
----
-
-## Gemini CLI Adapter
-
-### Protocol Mapping
-
-**Input: ACP → Gemini CLI** (spawns `gemini` per prompt)
-
-| ACP (from acpx)                           | Gemini CLI                                            |
-| ----------------------------------------- | ----------------------------------------------------- |
-| `session/prompt { prompt: [{text:"…"}] }` | `gemini --output-format stream-json --yolo "…"`       |
-| `session/prompt` (2nd+)                   | `gemini --output-format stream-json --yolo --resume latest "…"` |
-| `session/cancel`                          | SIGTERM to child process                              |
-| `session/close`                           | SIGTERM + reset session                               |
-
-**Output: Gemini CLI stream-json → ACP**
-
-| Gemini stream-json event                                    | ACP (to acpx)                    |
-| ----------------------------------------------------------- | -------------------------------- |
-| `{ type: "message", role: "assistant", content, delta }`    | `session/update { agent_message_chunk }` |
-| `{ type: "tool_use", tool_name, tool_id, parameters }`     | `session/update { tool_call }`   |
-| `{ type: "tool_result", tool_id, status, output }`         | `session/update { tool_result }` |
-| `{ type: "result", status: "success", stats }`             | prompt response (stopReason: end_turn) |
-| `{ type: "init", session_id, model }`                      | captured for session resume      |
-| `{ type: "error", message }`                               | prompt response (stopReason: error) |
-
-### CLI Flags
-
-```bash
-gemini --output-format stream-json --yolo "<prompt>"
-gemini --output-format stream-json --yolo --resume latest "<follow-up>"
-```
-
-| Flag | Purpose |
-| ---- | ------- |
-| `--output-format stream-json` | NDJSON streaming events on stdout |
-| `--yolo` | Auto-approve all tool calls (required for non-interactive ACP) |
-| `--resume latest` | Continue previous session for multi-turn |
-
-Reference: [Gemini CLI docs](https://geminicli.com/docs/cli/headless) | [GitHub](https://github.com/google-gemini/gemini-cli)
-
----
-
-## Prerequisites
-
-- **Node.js** >= 18
-- **Claude Code CLI** (`claude` in PATH) — for Claude adapter
-- **Codex CLI** (`codex` in PATH) — for Codex adapter
-- **Gemini CLI** (`gemini` in PATH) — for Gemini adapter
-- **OpenClaw** (`openclaw` in PATH) — for ACP integration
 
 ## Quick Start
 
@@ -174,55 +37,55 @@ Reference: [Gemini CLI docs](https://geminicli.com/docs/cli/headless) | [GitHub]
 npm install -g proxy-acpx-x
 ```
 
-Verify:
+Verify the binaries are available:
 ```bash
-which proxy-acpx-claude proxy-acpx-codex proxy-acpx-gemini
+proxy-acpx-server --help
+proxy-acpx-claude --help  # (no --help, but should not error)
 ```
 
 ### Step 2: Authenticate the target CLI
 
 ```bash
-# For Claude adapter
+# For Claude Code
 claude auth status          # check login
 claude auth login           # login if needed
 
-# For Codex adapter
+# For Codex
 codex                       # first run triggers auth
 
-# For Gemini adapter
+# For Gemini
 gemini                      # first run triggers auth
 ```
 
-### Step 3: Use as OpenClaw Model Provider (recommended)
-
-**3a. Start the server:**
+### Step 3: Start the HTTP proxy server
 
 ```bash
-# Foreground (see logs)
+# Foreground (see logs in terminal)
 proxy-acpx-server
 
-# Or as daemon (background)
+# As background daemon
 proxy-acpx-server -d
 
 # Custom port
 proxy-acpx-server -p 9000
 proxy-acpx-server -d -p 9000
-```
 
-Server commands:
-```bash
-proxy-acpx-server --status   # check if daemon is running
+# Manage daemon
+proxy-acpx-server --status   # check if running
 proxy-acpx-server --stop     # stop daemon
-proxy-acpx-server --help     # show all options
 ```
 
-**3b. Edit `~/.openclaw/openclaw.json`** — add the `models` section:
+Server starts at `http://127.0.0.1:52088` by default.
+
+### Step 4: Configure OpenClaw model provider
+
+Edit `~/.openclaw/openclaw.json` — **merge** this `models` block into your existing config:
 
 ```json
 {
-  "meta": { ... },
-  "commands": { ... },
-  "gateway": { ... },
+  "meta": { "..." : "keep your existing meta" },
+  "commands": { "..." : "keep your existing commands" },
+  "gateway": { "..." : "keep your existing gateway" },
   "models": {
     "providers": {
       "claude-local": {
@@ -236,72 +99,158 @@ proxy-acpx-server --help     # show all options
 }
 ```
 
-> **Note:** Merge the `models` block into your existing config — don't replace the whole file. Keep your existing `meta`, `commands`, `gateway` sections as-is.
+> **Important:** Don't replace the whole file. Add the `models` section alongside your existing `meta`, `commands`, `gateway` sections.
 
 > **Custom port?** If you used `-p 9000`, change `baseUrl` to `http://127.0.0.1:9000/v1`.
 
-**3c. Set as default model:**
+### Step 5: Set as default model and verify
 
 ```bash
 openclaw models set claude-code-proxy
-```
-
-**3d. Verify:**
-
-```bash
 openclaw models status
 ```
 
-You should see `claude-code-proxy` listed as the default model.
-
-**3e. Test:**
+### Step 6: Test
 
 Talk to OpenClaw — all requests now route through Claude Code CLI with your subscription auth.
 
-Then just talk to OpenClaw — all requests route through Claude Code CLI.
-
-**Custom port / model name:**
+**Test with curl:**
 ```bash
-PROXY_ACPX_PORT=9000 PROXY_ACPX_MODEL=my-claude proxy-acpx-server
-```
-
-**Endpoints:**
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/v1/models` | List available models |
-| POST | `/v1/chat/completions` | Chat completions (streaming SSE or JSON) |
-
-### Step 4: Use via ACP client (alternative)
-
-```bash
-# Claude Code
-openclaw acp client --server "proxy-acpx-claude" --verbose
-
-# Codex CLI
-openclaw acp client --server "proxy-acpx-codex" --verbose
-
-# Gemini CLI
-openclaw acp client --server "proxy-acpx-gemini" --verbose
-```
-
-This starts an interactive ACP session. Type a prompt and it routes through:
-`OpenClaw ACP client → proxy-acpx-x → CLI → AI API`
-
-### Step 5: Test standalone (no OpenClaw needed)
-
-```bash
-# Test the HTTP server with curl
-proxy-acpx-server &
 curl http://127.0.0.1:52088/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"messages":[{"role":"user","content":"What is 2+2?"}],"stream":true}'
+```
 
-# Test ACP adapter directly via stdin
+**Test model listing:**
+```bash
+curl http://127.0.0.1:52088/v1/models
+```
+
+---
+
+## HTTP Server Reference
+
+**Command:** `proxy-acpx-server`
+
+```
+Usage:
+  proxy-acpx-server [options]
+
+Options:
+  -p, --port <port>    Port (default: 52088)
+  -H, --host <host>    Host (default: 127.0.0.1)
+  -m, --model <name>   Model name (default: claude-code-proxy)
+  -d, --daemon         Run as background daemon
+  --stop               Stop running daemon
+  --status             Check daemon status
+  -h, --help           Show help
+
+Environment variables:
+  PROXY_ACPX_PORT      Same as --port
+  PROXY_ACPX_HOST      Same as --host
+  PROXY_ACPX_MODEL     Same as --model
+```
+
+**Endpoints:**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/v1/models` | List available models |
+| `POST` | `/v1/chat/completions` | OpenAI-compatible chat (streaming SSE or JSON) |
+
+**PID file:** `~/.proxy-acpx-server.pid`
+
+---
+
+## ACP Adapters (alternative to HTTP server)
+
+For direct ACP protocol usage without the HTTP wrapper:
+
+```bash
+# Via OpenClaw ACP client
+openclaw acp client --server "proxy-acpx-claude" --verbose
+openclaw acp client --server "proxy-acpx-codex" --verbose
+openclaw acp client --server "proxy-acpx-gemini" --verbose
+
+# Via stdin (raw ACP messages)
 (echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'; \
  sleep 2; \
  echo '{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"What is 2+2?"}]}}'; \
  sleep 30) | proxy-acpx-claude
 ```
+
+---
+
+## Protocol Mapping
+
+<details>
+<summary>Claude Code Adapter</summary>
+
+**Input:** ACP → `claude -p --input-format stream-json --output-format stream-json --verbose --include-partial-messages --permission-mode bypassPermissions`
+
+| ACP | Claude Code stream-json |
+|-----|------------------------|
+| `session/prompt { prompt }` | `{"type":"user","message":{"role":"user","content":"…"}}` on stdin |
+| `session/cancel` | SIGTERM |
+| `session/close` | Close stdin + SIGTERM |
+
+**Output:** Claude Code stream-json → ACP
+
+| Claude event | ACP |
+|-------------|-----|
+| `stream_event { content_block_delta, text_delta }` | `session/update { agent_message_chunk }` |
+| `stream_event { content_block_stop }` (after tool_use) | `session/update { tool_call }` |
+| `result { subtype: "success" }` | prompt response (end_turn) |
+
+Reference: [Claude Code headless docs](https://code.claude.com/docs/en/headless)
+
+</details>
+
+<details>
+<summary>Codex CLI Adapter</summary>
+
+**Input:** ACP → `codex exec --json --full-auto "<prompt>"`
+
+| ACP | Codex CLI |
+|-----|----------|
+| `session/prompt` (1st) | `codex exec --json --full-auto "…"` |
+| `session/prompt` (2nd+) | `codex exec resume --last --json "…"` |
+
+**Output:** Codex JSON Lines → ACP
+
+| Codex event | ACP |
+|------------|-----|
+| `item.created { message }` | `session/update { agent_message_chunk }` |
+| `item.created { tool_use }` | `session/update { tool_call }` |
+| `turn.completed` | prompt response (end_turn) |
+
+Reference: [Codex CLI docs](https://developers.openai.com/codex/cli)
+
+</details>
+
+<details>
+<summary>Gemini CLI Adapter</summary>
+
+**Input:** ACP → `gemini --output-format stream-json --yolo "<prompt>"`
+
+| ACP | Gemini CLI |
+|-----|-----------|
+| `session/prompt` (1st) | `gemini --output-format stream-json --yolo "…"` |
+| `session/prompt` (2nd+) | `gemini ... --resume latest "…"` |
+
+**Output:** Gemini stream-json → ACP
+
+| Gemini event | ACP |
+|-------------|-----|
+| `message { role: "assistant" }` | `session/update { agent_message_chunk }` |
+| `tool_use { tool_name }` | `session/update { tool_call }` |
+| `result { status: "success" }` | prompt response (end_turn) |
+
+Reference: [Gemini CLI docs](https://geminicli.com/docs/cli/headless) | [GitHub](https://github.com/google-gemini/gemini-cli)
+
+</details>
+
+---
 
 ## Installation from Source
 
@@ -325,67 +274,46 @@ node dist/gemini-adapter.js   # Gemini
 ```bash
 npm install          # Install dependencies
 npm run build        # Compile TypeScript → dist/
-npm run dev          # Run Claude adapter with ts-node
+npm start            # Run HTTP server
+npm run start:acp    # Run Claude ACP adapter
 ```
 
 ## Testing
 
 ```bash
-npm test             # Run all unit tests (vitest, 97 tests)
-npm run test:watch   # Run tests in watch mode
-npm run test:smoke   # Run E2E smoke tests against Claude adapter
+npm test             # 97 unit + integration tests (vitest)
+npm run test:watch   # Watch mode
+npm run test:smoke   # 24 shell smoke tests (8 per adapter)
 ```
 
-**Unit tests:**
-- `test/protocol.test.ts` — 24 tests for ACP ↔ Claude Code stream-json translation
-- `test/codex-protocol.test.ts` — 16 tests for ACP ↔ Codex CLI translation
-- `test/gemini-protocol.test.ts` — 15 tests for ACP ↔ Gemini CLI translation
-- `test/adapter-acp.test.ts` — 42 integration tests (14 per adapter, spawned as child processes)
-
-**Smoke tests** (`test/smoke.sh`) — 24 shell tests (8 per adapter).
-
-### Manual E2E test
-
-```bash
-npm run build
-
-# Claude adapter
-node dist/adapter.js
-# paste: {"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}
-# paste: {"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"What is 2+2?"}]}}
-
-# Codex adapter
-node dist/codex-adapter.js
-
-# Gemini adapter
-node dist/gemini-adapter.js
-
-# Then paste for any adapter:
-# {"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}
-# {"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"What is 2+2?"}]}}
-```
+**Test files:**
+- `test/protocol.test.ts` — 24 tests: ACP ↔ Claude stream-json
+- `test/codex-protocol.test.ts` — 16 tests: ACP ↔ Codex JSON Lines
+- `test/gemini-protocol.test.ts` — 15 tests: ACP ↔ Gemini stream-json
+- `test/adapter-acp.test.ts` — 42 tests: integration (all 3 adapters as child processes)
+- `test/smoke.sh` — 24 tests: E2E shell tests
 
 ## Troubleshooting
 
-**"Failed to spawn claude/codex/gemini"** — Ensure the CLI is in your PATH. Run `which claude`, `which codex`, or `which gemini`.
+**"Failed to spawn claude/codex/gemini"** — CLI not in PATH. Run `which claude` / `which codex` / `which gemini`.
 
-**No output** — Check stderr logs (prefixed `[proxy-acpx-x]`, `[proxy-acpx-x:codex]`, or `[proxy-acpx-x:gemini]`).
+**`[object Object]` in responses** — Update to latest version: `npm install -g proxy-acpx-x@latest`
 
-**Permission errors** — Claude uses `bypassPermissions`, Codex uses `--full-auto`, Gemini uses `--yolo`. For finer control, modify the spawn args.
+**No output** — Check stderr logs: `[proxy-acpx-x:http]`, `[proxy-acpx-x]`, `[proxy-acpx-x:codex]`, `[proxy-acpx-x:gemini]`.
 
-**Slow startup (Claude)** — Add `--bare` to `buildClaudeArgs({ bare: true })` in `src/protocol.ts` to skip hooks/plugins for faster startup (but this also skips OAuth auth).
+**Auth errors (Claude)** — Run `claude auth login`. The server does NOT use `--bare` so subscription auth works.
+
+**Context overflow in OpenClaw** — Normal on first request with large system prompts. OpenClaw auto-compacts and retries.
 
 ## References
 
 - [Claude Code headless mode](https://code.claude.com/docs/en/headless)
-- [Agent SDK streaming output](https://platform.claude.com/docs/en/agent-sdk/streaming-output)
-- [Agent SDK streaming input](https://platform.claude.com/docs/en/agent-sdk/streaming-vs-single-mode)
-- [Codex CLI features](https://developers.openai.com/codex/cli/features)
-- [Codex CLI reference](https://developers.openai.com/codex/cli/reference)
+- [Agent SDK streaming](https://platform.claude.com/docs/en/agent-sdk/streaming-output)
+- [Codex CLI](https://developers.openai.com/codex/cli)
 - [Codex non-interactive mode](https://developers.openai.com/codex/noninteractive)
-- [Gemini CLI headless mode](https://geminicli.com/docs/cli/headless)
-- [Gemini CLI configuration](https://geminicli.com/docs/reference/configuration/)
+- [Gemini CLI headless](https://geminicli.com/docs/cli/headless)
 - [Gemini CLI GitHub](https://github.com/google-gemini/gemini-cli)
+- [npm package](https://www.npmjs.com/package/proxy-acpx-x)
 
 ## License
 
