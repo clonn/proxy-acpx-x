@@ -119,7 +119,7 @@ const MODEL_NAME = getArg("-m", getArg("--model", process.env.PROXY_ACPX_MODEL ?
 
 interface ChatMessage {
   role: string;
-  content: string;
+  content: string | Array<{ type: string; text?: string; image_url?: unknown }>;
 }
 
 interface ChatRequest {
@@ -154,16 +154,28 @@ function log(msg: string): void {
   process.stderr.write(`[proxy-acpx-x:http] ${msg}\n`);
 }
 
+function contentToString(content: ChatMessage["content"]): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .filter((b) => b.type === "text" && b.text)
+      .map((b) => b.text!)
+      .join("\n");
+  }
+  return String(content);
+}
+
 function extractPrompt(messages: ChatMessage[]): string {
-  // Combine system prompt + user messages
   const parts: string[] = [];
   for (const msg of messages) {
+    const text = contentToString(msg.content);
+    if (!text) continue;
     if (msg.role === "system") {
-      parts.push(`[System] ${msg.content}`);
+      parts.push(`[System] ${text}`);
     } else if (msg.role === "user") {
-      parts.push(msg.content);
+      parts.push(text);
     } else if (msg.role === "assistant") {
-      parts.push(`[Previous assistant response] ${msg.content}`);
+      parts.push(`[Previous assistant response] ${text}`);
     }
   }
   return parts.join("\n\n");
@@ -259,9 +271,11 @@ function handleStreamingRequest(
   proc.stdin!.end();
 
   // Parse Claude output and forward as SSE
+  let hasStreamedText = false;
+  let resultSent = false;
   const rl = createInterface({ input: proc.stdout! });
   rl.on("line", (line) => {
-    if (!line.trim()) return;
+    if (!line.trim() || resultSent) return;
     let msg: ClaudeStreamOutput;
     try {
       msg = JSON.parse(line);
@@ -269,19 +283,27 @@ function handleStreamingRequest(
       return;
     }
 
+    log(`Claude output: type=${msg.type} subtype=${msg.subtype ?? ""}`);
+
     if (msg.type === "stream_event" && msg.event) {
       const evt = msg.event;
       if (evt.type === "content_block_delta" && evt.delta?.type === "text_delta" && evt.delta.text) {
-        res.write(sseChunk(evt.delta.text, model));
+        res.write(sseChunk(String(evt.delta.text), model));
+        hasStreamedText = true;
       }
-    } else if (msg.type === "assistant" && msg.message?.content) {
-      // Complete message fallback (if stream_events weren't sent)
+    } else if (msg.type === "assistant" && msg.message?.content && !hasStreamedText) {
+      // Complete message fallback — only if no stream_events were received
       for (const block of msg.message.content) {
         if (block.type === "text" && block.text) {
-          res.write(sseChunk(block.text, model));
+          res.write(sseChunk(String(block.text), model));
         }
       }
     } else if (msg.type === "result") {
+      // If no text was streamed at all, use the result text
+      if (!hasStreamedText && msg.result && typeof msg.result === "string") {
+        res.write(sseChunk(msg.result, model));
+      }
+      resultSent = true;
       res.write(sseDone(model));
       res.end();
     }
