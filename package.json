@@ -1,12 +1,12 @@
 {
   "name": "proxy-acpx-x",
   "version": "1.0.0",
-  "description": "ACP ↔ Claude Code stream-json adapter — use Claude Code CLI subscription auth with OpenClaw/acpx",
+  "description": "ACP adapters for Claude Code CLI and Codex CLI — proxy-acpx-x where x is the CLI name",
   "main": "dist/adapter.js",
   "types": "dist/adapter.d.ts",
   "bin": {
-    "proxy-acpx-x": "dist/adapter.js",
-    "proxy-acpx-x-codex": "dist/codex-adapter.js"
+    "proxy-acpx-claude": "dist/adapter.js",
+    "proxy-acpx-codex": "dist/codex-adapter.js"
   },
   "files": [
     "dist",

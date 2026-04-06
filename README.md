@@ -6,20 +6,22 @@ ACP adapters for routing OpenClaw/acpx traffic through **Claude Code CLI** or **
 
 | Backend | Command | CLI Used |
 |---------|---------|----------|
-| **Claude Code** | `proxy-acpx-x` | `claude -p --input-format stream-json --output-format stream-json` |
-| **Codex CLI** | `proxy-acpx-x-codex` | `codex exec --json --full-auto` |
+| **Claude Code** | `proxy-acpx-claude` | `claude -p --input-format stream-json --output-format stream-json` |
+| **Codex CLI** | `proxy-acpx-codex` | `codex exec --json --full-auto` |
 
 ## Architecture
 
 ```
 Claude Code backend:
-  OpenClaw → acpx → proxy-acpx-x       → claude CLI (stream-json) → Anthropic API
+  OpenClaw → acpx → proxy-acpx-claude → claude CLI (stream-json) → Anthropic API
 
 Codex CLI backend:
-  OpenClaw → acpx → proxy-acpx-x-codex → codex exec (JSON Lines)  → OpenAI API
+  OpenClaw → acpx → proxy-acpx-codex  → codex exec (JSON Lines)  → OpenAI API
 ```
 
 Both adapters are thin NDJSON translators. The ACP side is identical — only the CLI protocol differs.
+
+> **Naming:** `proxy-acpx-x` where `x` is the target CLI — `proxy-acpx-claude`, `proxy-acpx-codex`, etc.
 
 ---
 
@@ -138,13 +140,13 @@ npm run build
 ### Claude Code backend
 
 ```bash
-acpx config set agents.claude-native.command "proxy-acpx-x"
+acpx config set agents.claude-native.command "proxy-acpx-claude"
 ```
 
 ### Codex CLI backend
 
 ```bash
-acpx config set agents.codex-native.command "proxy-acpx-x-codex"
+acpx config set agents.codex-native.command "proxy-acpx-codex"
 ```
 
 ### OpenClaw config (`~/.openclaw/config.json`)
