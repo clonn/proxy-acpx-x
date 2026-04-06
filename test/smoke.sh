@@ -1,117 +1,197 @@
 #!/bin/bash
-# Smoke test for proxy-acpx-x adapter
-# Tests the ACP protocol handshake without actually calling Claude API
+# Smoke tests for proxy-acpx-x adapters
+# Tests ACP protocol handling for both Claude and Codex adapters
+# Does NOT require actual Claude/Codex CLI
 #
-# Usage: bash test/smoke.sh
+# Usage:
+#   bash test/smoke.sh              # Test both adapters
+#   bash test/smoke.sh claude       # Test Claude adapter only
+#   bash test/smoke.sh codex        # Test Codex adapter only
 
-set -euo pipefail
+set -uo pipefail
 
-ADAPTER="node dist/adapter.js"
+CLAUDE_ADAPTER="node dist/adapter.js"
+CODEX_ADAPTER="node dist/codex-adapter.js"
 PASSED=0
 FAILED=0
+TARGET="${1:-all}"
 
-echo "=== proxy-acpx-x Smoke Tests ==="
-echo ""
-
-# Helper: send ACP message and capture first stdout line
-# Uses perl-based timeout for macOS compatibility
+# Helper: send ACP message and get first response line
+# Uses a background process + timeout to avoid hangs
 send_acp() {
-  local input="$1"
-  echo "$input" | perl -e 'alarm 5; exec @ARGV' $ADAPTER 2>/dev/null | head -1
+  local adapter="$1"
+  local input="$2"
+  local tmpfile
+  tmpfile=$(mktemp)
+
+  # Start adapter in background, send input, capture output
+  echo "$input" | $adapter > "$tmpfile" 2>/dev/null &
+  local pid=$!
+
+  # Wait up to 3 seconds for output
+  local i=0
+  while [ $i -lt 30 ]; do
+    if [ -s "$tmpfile" ]; then
+      break
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+
+  kill $pid 2>/dev/null || true
+  wait $pid 2>/dev/null || true
+
+  head -1 "$tmpfile"
+  rm -f "$tmpfile"
 }
 
-# Test 1: Initialize handshake
-echo "Test 1: Initialize handshake"
-RESULT=$(send_acp '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}')
+# Helper: send multiple ACP messages and get last response
+send_acp_last() {
+  local adapter="$1"
+  local input="$2"
+  local expected_lines="$3"
+  local tmpfile
+  tmpfile=$(mktemp)
 
-if echo "$RESULT" | python3 -c "
+  printf '%s\n' "$input" | $adapter > "$tmpfile" 2>/dev/null &
+  local pid=$!
+
+  local i=0
+  while [ $i -lt 30 ]; do
+    local count
+    count=$(wc -l < "$tmpfile" | tr -d ' ')
+    if [ "$count" -ge "$expected_lines" ]; then
+      break
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+
+  kill $pid 2>/dev/null || true
+  wait $pid 2>/dev/null || true
+
+  tail -1 "$tmpfile"
+  rm -f "$tmpfile"
+}
+
+# Helper: assert JSON
+assert_json() {
+  local test_name="$1"
+  local result="$2"
+  local assertion="$3"
+
+  if [ -z "$result" ]; then
+    echo "  FAIL: $test_name (empty response)"
+    ((FAILED++))
+    return
+  fi
+
+  if echo "$result" | python3 -c "
 import sys, json
 r = json.load(sys.stdin)
-assert r['jsonrpc'] == '2.0'
+$assertion
+print('PASS')
+" 2>/dev/null; then
+    ((PASSED++))
+  else
+    echo "  FAIL: $test_name"
+    echo "  Response: $result"
+    ((FAILED++))
+  fi
+}
+
+# ─── Tests ────────────────────────────────────────────────────────────────────
+
+run_adapter_tests() {
+  local name="$1"
+  local adapter="$2"
+  local server_name="$3"
+
+  echo "=== $name ==="
+  echo ""
+
+  echo "Test 1: Session create"
+  RESULT=$(send_acp "$adapter" '{"jsonrpc":"2.0","id":1,"method":"session/create","params":{"sessionId":"test"}}')
+  assert_json "session/create" "$RESULT" "
 assert r['id'] == 1
-assert 'result' in r
-assert r['result']['serverInfo']['name'] == 'proxy-acpx-x'
-assert r['result']['capabilities']['streaming'] == True
-print('PASS')
-" 2>/dev/null; then
-  ((PASSED++))
-else
-  echo "  FAIL: unexpected response: $RESULT"
-  ((FAILED++))
-fi
+assert r['result']['sessionId'] == 'test'
+"
 
-# Test 2: Session create
-echo "Test 2: Session create"
-RESULT=$(send_acp '{"jsonrpc":"2.0","id":2,"method":"session/create","params":{"sessionId":"test-session"}}')
-
-if echo "$RESULT" | python3 -c "
-import sys, json
-r = json.load(sys.stdin)
+  echo "Test 2: Empty prompt"
+  RESULT=$(send_acp "$adapter" '{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"prompt":[]}}')
+  assert_json "empty prompt" "$RESULT" "
 assert r['id'] == 2
-assert r['result']['sessionId'] == 'test-session'
-print('PASS')
-" 2>/dev/null; then
-  ((PASSED++))
-else
-  echo "  FAIL: unexpected response: $RESULT"
-  ((FAILED++))
-fi
+assert r['result']['stopReason'] == 'end_turn'
+"
 
-# Test 3: Empty prompt returns immediately
-echo "Test 3: Empty prompt returns end_turn"
-RESULT=$(send_acp '{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"prompt":[]}}')
-
-if echo "$RESULT" | python3 -c "
-import sys, json
-r = json.load(sys.stdin)
+  echo "Test 3: Non-text prompt"
+  RESULT=$(send_acp "$adapter" '{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"prompt":[{"type":"image","text":"x"}]}}')
+  assert_json "non-text prompt" "$RESULT" "
 assert r['id'] == 3
 assert r['result']['stopReason'] == 'end_turn'
-print('PASS')
-" 2>/dev/null; then
-  ((PASSED++))
-else
-  echo "  FAIL: unexpected response: $RESULT"
-  ((FAILED++))
-fi
+"
 
-# Test 4: Unknown method returns error
-echo "Test 4: Unknown method returns error"
-RESULT=$(send_acp '{"jsonrpc":"2.0","id":4,"method":"unknown/method","params":{}}')
-
-if echo "$RESULT" | python3 -c "
-import sys, json
-r = json.load(sys.stdin)
+  echo "Test 4: Unknown method"
+  RESULT=$(send_acp "$adapter" '{"jsonrpc":"2.0","id":4,"method":"foo/bar","params":{}}')
+  assert_json "unknown method" "$RESULT" "
 assert r['id'] == 4
 assert 'error' in r
 assert r['error']['code'] == -32601
-print('PASS')
-" 2>/dev/null; then
-  ((PASSED++))
-else
-  echo "  FAIL: unexpected response: $RESULT"
-  ((FAILED++))
-fi
+"
 
-# Test 5: Session close
-echo "Test 5: Session close"
-RESULT=$(send_acp '{"jsonrpc":"2.0","id":5,"method":"session/close","params":{}}')
-
-if echo "$RESULT" | python3 -c "
-import sys, json
-r = json.load(sys.stdin)
+  echo "Test 5: Session cancel"
+  RESULT=$(send_acp "$adapter" '{"jsonrpc":"2.0","id":5,"method":"session/cancel","params":{}}')
+  assert_json "session/cancel" "$RESULT" "
 assert r['id'] == 5
+assert r['result']['cancelled'] == True
+"
+
+  echo "Test 6: Session close"
+  RESULT=$(send_acp "$adapter" '{"jsonrpc":"2.0","id":6,"method":"session/close","params":{}}')
+  assert_json "session/close" "$RESULT" "
+assert r['id'] == 6
 assert r['result']['closed'] == True
-print('PASS')
-" 2>/dev/null; then
-  ((PASSED++))
-else
-  echo "  FAIL: unexpected response: $RESULT"
-  ((FAILED++))
-fi
+"
+
+  echo "Test 7: Initialize"
+  RESULT=$(send_acp "$adapter" '{"jsonrpc":"2.0","id":7,"method":"initialize","params":{}}')
+  assert_json "initialize" "$RESULT" "
+assert r['id'] == 7
+assert r['result']['serverInfo']['name'] == '$server_name'
+assert r['result']['capabilities']['streaming'] == True
+"
+
+  echo "Test 8: Lifecycle (create → prompt → close)"
+  INPUT=$'{"jsonrpc":"2.0","id":8,"method":"session/create","params":{"sessionId":"lc"}}\n{"jsonrpc":"2.0","id":9,"method":"session/prompt","params":{"prompt":[]}}\n{"jsonrpc":"2.0","id":10,"method":"session/close","params":{}}'
+  RESULT=$(send_acp_last "$adapter" "$INPUT" 3)
+  assert_json "lifecycle" "$RESULT" "
+assert r['id'] == 10
+assert r['result']['closed'] == True
+"
+
+  echo ""
+}
+
+# ─── Run ──────────────────────────────────────────────────────────────────────
 
 echo ""
-echo "=== Results: $PASSED passed, $FAILED failed ==="
+echo "=============================="
+echo "  proxy-acpx-x Smoke Tests"
+echo "=============================="
+echo ""
 
-if [ "$FAILED" -gt 0 ]; then
-  exit 1
-fi
+case "$TARGET" in
+  claude) run_adapter_tests "Claude (proxy-acpx-claude)" "$CLAUDE_ADAPTER" "proxy-acpx-x" ;;
+  codex)  run_adapter_tests "Codex (proxy-acpx-codex)" "$CODEX_ADAPTER" "proxy-acpx-x-codex" ;;
+  all)
+    run_adapter_tests "Claude (proxy-acpx-claude)" "$CLAUDE_ADAPTER" "proxy-acpx-x"
+    run_adapter_tests "Codex (proxy-acpx-codex)" "$CODEX_ADAPTER" "proxy-acpx-x-codex"
+    ;;
+  *) echo "Usage: $0 [claude|codex|all]"; exit 1 ;;
+esac
+
+echo "=============================="
+echo "  Results: $PASSED passed, $FAILED failed"
+echo "=============================="
+
+[ "$FAILED" -gt 0 ] && exit 1 || exit 0

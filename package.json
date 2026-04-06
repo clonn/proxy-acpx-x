@@ -19,7 +19,9 @@
     "dev": "ts-node src/adapter.ts",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:smoke": "bash test/smoke.sh"
+    "test:smoke": "bash test/smoke.sh",
+    "test:smoke:claude": "bash test/smoke.sh claude",
+    "test:smoke:codex": "bash test/smoke.sh codex"
   },
   "repository": {
     "type": "git",
