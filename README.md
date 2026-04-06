@@ -193,7 +193,64 @@ codex                       # first run triggers auth
 gemini                      # first run triggers auth
 ```
 
-### Step 3: Test with OpenClaw ACP client
+### Step 3: Use as OpenClaw Model Provider (recommended)
+
+Start the OpenAI-compatible HTTP server:
+
+```bash
+proxy-acpx-server
+# Server running at http://127.0.0.1:52088
+```
+
+Configure OpenClaw to use it as a model provider:
+
+```bash
+# Set the custom endpoint
+openclaw config set models.providers.claude-local.type "openai-compatible"
+openclaw config set models.providers.claude-local.baseUrl "http://127.0.0.1:52088/v1"
+openclaw config set models.providers.claude-local.apiKey "sk-dummy-key"
+
+# Set as default model
+openclaw models set claude-code-proxy
+```
+
+Or edit `~/.openclaw/openclaw.json` directly:
+
+```json
+{
+  "models": {
+    "providers": {
+      "claude-local": {
+        "type": "openai-compatible",
+        "baseUrl": "http://127.0.0.1:52088/v1",
+        "apiKey": "sk-dummy-key",
+        "models": ["claude-code-proxy"]
+      }
+    },
+    "default": "claude-code-proxy"
+  }
+}
+```
+
+Verify:
+```bash
+openclaw models status
+```
+
+Then just talk to OpenClaw — all requests route through Claude Code CLI.
+
+**Custom port / model name:**
+```bash
+PROXY_ACPX_PORT=9000 PROXY_ACPX_MODEL=my-claude proxy-acpx-server
+```
+
+**Endpoints:**
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/v1/models` | List available models |
+| POST | `/v1/chat/completions` | Chat completions (streaming SSE or JSON) |
+
+### Step 4: Use via ACP client (alternative)
 
 ```bash
 # Claude Code
@@ -209,17 +266,21 @@ openclaw acp client --server "proxy-acpx-gemini" --verbose
 This starts an interactive ACP session. Type a prompt and it routes through:
 `OpenClaw ACP client → proxy-acpx-x → CLI → AI API`
 
-### Step 4: Test standalone (no OpenClaw needed)
+### Step 5: Test standalone (no OpenClaw needed)
 
 ```bash
-# Send ACP messages directly via stdin
+# Test the HTTP server with curl
+proxy-acpx-server &
+curl http://127.0.0.1:52088/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"What is 2+2?"}],"stream":true}'
+
+# Test ACP adapter directly via stdin
 (echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'; \
  sleep 2; \
- echo '{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"What is 2+2? Reply with just the number."}]}}'; \
+ echo '{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"What is 2+2?"}]}}'; \
  sleep 30) | proxy-acpx-claude
 ```
-
-stdout = ACP JSON responses, stderr = debug logs.
 
 ## Installation from Source
 
@@ -229,8 +290,13 @@ cd proxy-acpx-x
 npm install
 npm run build
 
-# Then use node dist/adapter.js instead of proxy-acpx-claude
-# Or: node dist/codex-adapter.js / node dist/gemini-adapter.js
+# HTTP server
+node dist/http-server.js
+
+# ACP adapters
+node dist/adapter.js          # Claude
+node dist/codex-adapter.js    # Codex
+node dist/gemini-adapter.js   # Gemini
 ```
 
 ## Development

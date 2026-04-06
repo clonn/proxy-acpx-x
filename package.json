@@ -1,13 +1,14 @@
 {
   "name": "proxy-acpx-x",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "ACP adapters for Claude Code, Codex, and Gemini CLI — proxy-acpx-x where x is the CLI name",
   "main": "dist/adapter.js",
   "types": "dist/adapter.d.ts",
   "bin": {
     "proxy-acpx-claude": "dist/adapter.js",
     "proxy-acpx-codex": "dist/codex-adapter.js",
-    "proxy-acpx-gemini": "dist/gemini-adapter.js"
+    "proxy-acpx-gemini": "dist/gemini-adapter.js",
+    "proxy-acpx-server": "dist/http-server.js"
   },
   "files": [
     "dist",
@@ -16,7 +17,8 @@
   "scripts": {
     "build": "tsc",
     "prepublishOnly": "npm run build && npm test",
-    "start": "node dist/adapter.js",
+    "start": "node dist/http-server.js",
+    "start:acp": "node dist/adapter.js",
     "dev": "ts-node src/adapter.ts",
     "test": "vitest run",
     "test:watch": "vitest",
