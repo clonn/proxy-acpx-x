@@ -168,20 +168,43 @@ function contentToString(content: ChatMessage["content"]): string {
   return String(content);
 }
 
+// ~4 chars per token; 128k context minus headroom for response + system prompt
+const MAX_PROMPT_CHARS = 300_000;
+
 function extractPrompt(messages: ChatMessage[]): string {
-  const parts: string[] = [];
+  // Separate system messages (always kept) from conversation history
+  const systemParts: string[] = [];
+  const convParts: { role: string; text: string }[] = [];
+
   for (const msg of messages) {
     const text = contentToString(msg.content);
     if (!text) continue;
     if (msg.role === "system") {
-      parts.push(`[System] ${text}`);
-    } else if (msg.role === "user") {
-      parts.push(text);
-    } else if (msg.role === "assistant") {
-      parts.push(`[Previous assistant response] ${text}`);
+      systemParts.push(`[System] ${text}`);
+    } else {
+      convParts.push({ role: msg.role, text });
     }
   }
-  return parts.join("\n\n");
+
+  const systemText = systemParts.join("\n\n");
+  const budget = MAX_PROMPT_CHARS - systemText.length;
+
+  // Walk conversation from newest to oldest, keeping what fits
+  const kept: string[] = [];
+  let used = 0;
+  for (let i = convParts.length - 1; i >= 0; i--) {
+    const { role, text } = convParts[i];
+    const formatted = role === "assistant" ? `[Previous assistant response] ${text}` : text;
+    if (used + formatted.length > budget) {
+      log(`Prompt truncated: dropped ${i + 1} older message(s) to fit within ${MAX_PROMPT_CHARS} chars`);
+      break;
+    }
+    kept.unshift(formatted);
+    used += formatted.length;
+  }
+
+  const allParts = systemText ? [systemText, ...kept] : kept;
+  return allParts.join("\n\n");
 }
 
 function sseChunk(content: string, model: string): string {
