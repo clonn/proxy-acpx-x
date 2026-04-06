@@ -164,92 +164,74 @@ Reference: [Gemini CLI docs](https://geminicli.com/docs/cli/headless) | [GitHub]
 - **Claude Code CLI** (`claude` in PATH) — for Claude adapter
 - **Codex CLI** (`codex` in PATH) — for Codex adapter
 - **Gemini CLI** (`gemini` in PATH) — for Gemini adapter
-- **OpenClaw** with acpx plugin
+- **OpenClaw** (`openclaw` in PATH) — for ACP integration
 
-## Installation
+## Quick Start
+
+### Step 1: Install
 
 ```bash
-# From npm
 npm install -g proxy-acpx-x
+```
 
-# Or from source
+Verify:
+```bash
+which proxy-acpx-claude proxy-acpx-codex proxy-acpx-gemini
+```
+
+### Step 2: Authenticate the target CLI
+
+```bash
+# For Claude adapter
+claude auth status          # check login
+claude auth login           # login if needed
+
+# For Codex adapter
+codex                       # first run triggers auth
+
+# For Gemini adapter
+gemini                      # first run triggers auth
+```
+
+### Step 3: Test with OpenClaw ACP client
+
+```bash
+# Claude Code
+openclaw acp client --server "proxy-acpx-claude" --verbose
+
+# Codex CLI
+openclaw acp client --server "proxy-acpx-codex" --verbose
+
+# Gemini CLI
+openclaw acp client --server "proxy-acpx-gemini" --verbose
+```
+
+This starts an interactive ACP session. Type a prompt and it routes through:
+`OpenClaw ACP client → proxy-acpx-x → CLI → AI API`
+
+### Step 4: Test standalone (no OpenClaw needed)
+
+```bash
+# Send ACP messages directly via stdin
+(echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'; \
+ sleep 2; \
+ echo '{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"What is 2+2? Reply with just the number."}]}}'; \
+ sleep 30) | proxy-acpx-claude
+```
+
+stdout = ACP JSON responses, stderr = debug logs.
+
+## Installation from Source
+
+```bash
 git clone https://github.com/clonn/proxy-acpx-x.git
 cd proxy-acpx-x
 npm install
 npm run build
+
+# Then use node dist/adapter.js instead of proxy-acpx-claude
+# Or: node dist/codex-adapter.js / node dist/gemini-adapter.js
 ```
-
-## Setup with OpenClaw / acpx
-
-### Claude Code backend
-
-```bash
-acpx config set agents.claude-native.command "proxy-acpx-claude"
-```
-
-### Codex CLI backend
-
-```bash
-acpx config set agents.codex-native.command "proxy-acpx-codex"
-```
-
-### Gemini CLI backend
-
-```bash
-acpx config set agents.gemini-native.command "proxy-acpx-gemini"
-```
-
-### OpenClaw config (`~/.openclaw/config.json`)
-
-```json
-{
-  "acp": {
-    "enabled": true,
-    "dispatch": { "enabled": true },
-    "backend": "acpx",
-    "defaultAgent": "claude-native"
-  }
-}
-```
-
-Change `defaultAgent` to `"codex-native"` to use Codex by default.
-
-### Direct execution (testing)
-
-```bash
-# Claude adapter
-echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | node dist/adapter.js
-
-# Codex adapter
-echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | node dist/codex-adapter.js
-
-# Gemini adapter
-echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | node dist/gemini-adapter.js
-```
-
-## Usage
-
-Once configured, OpenClaw routes requests through the adapter automatically:
-
-```
-You: "Refactor this function"
-```
-
-**Manual spawn:**
-```
-/acp spawn claude-native --mode persistent --thread auto
-/acp spawn codex-native --mode persistent --thread auto
-/acp spawn gemini-native --mode persistent --thread auto
-```
-
-**Common commands:**
-
-| Command            | Description               |
-| ------------------ | ------------------------- |
-| `/acp status`      | Check current session     |
-| `/acp steer <msg>` | Send follow-up instruction|
-| `/acp cancel`      | Cancel current turn       |
-| `/acp close`       | Close session             |
 
 ## Development
 
