@@ -1,6 +1,6 @@
 {
   "name": "proxy-acpx-x",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "ACP adapters for Claude Code CLI and Codex CLI — proxy-acpx-x where x is the CLI name",
   "main": "dist/adapter.js",
   "types": "dist/adapter.d.ts",
