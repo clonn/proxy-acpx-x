@@ -18,12 +18,102 @@
 import * as http from "http";
 import { spawn, ChildProcess } from "child_process";
 import { createInterface } from "readline";
+import * as fs from "fs";
+import * as path from "path";
+
+// ─── CLI args ────────────────────────────────────────────────────────────────
+
+const args = process.argv.slice(2);
+
+function getArg(flag: string, fallback: string): string {
+  const idx = args.indexOf(flag);
+  if (idx !== -1 && args[idx + 1]) return args[idx + 1];
+  return fallback;
+}
+
+const hasFlag = (flag: string) => args.includes(flag);
+
+if (hasFlag("--help") || hasFlag("-h")) {
+  console.log(`proxy-acpx-server — OpenAI-compatible proxy to Claude Code CLI
+
+Usage:
+  proxy-acpx-server [options]
+
+Options:
+  -p, --port <port>    Port to listen on (default: 52088)
+  -H, --host <host>    Host to bind to (default: 127.0.0.1)
+  -m, --model <name>   Model name to advertise (default: claude-code-proxy)
+  -d, --daemon         Run as background daemon (writes PID to ~/.proxy-acpx-server.pid)
+  --stop               Stop a running daemon
+  --status             Check if daemon is running
+  -h, --help           Show this help
+
+Environment variables:
+  PROXY_ACPX_PORT      Same as --port
+  PROXY_ACPX_HOST      Same as --host
+  PROXY_ACPX_MODEL     Same as --model
+
+Examples:
+  proxy-acpx-server                    # Start on port 52088
+  proxy-acpx-server -p 9000            # Start on port 9000
+  proxy-acpx-server -d                 # Start as daemon
+  proxy-acpx-server -d -p 9000         # Daemon on port 9000
+  proxy-acpx-server --stop             # Stop daemon
+  proxy-acpx-server --status           # Check daemon status`);
+  process.exit(0);
+}
+
+const PID_FILE = path.join(process.env.HOME ?? "/tmp", ".proxy-acpx-server.pid");
+
+// --stop: kill running daemon
+if (hasFlag("--stop")) {
+  try {
+    const pid = parseInt(fs.readFileSync(PID_FILE, "utf-8").trim(), 10);
+    process.kill(pid, "SIGTERM");
+    fs.unlinkSync(PID_FILE);
+    console.log(`Stopped daemon (PID ${pid})`);
+  } catch {
+    console.log("No running daemon found");
+  }
+  process.exit(0);
+}
+
+// --status: check if running
+if (hasFlag("--status")) {
+  try {
+    const pid = parseInt(fs.readFileSync(PID_FILE, "utf-8").trim(), 10);
+    process.kill(pid, 0); // signal 0 = check if alive
+    console.log(`Daemon running (PID ${pid})`);
+  } catch {
+    console.log("Daemon not running");
+  }
+  process.exit(0);
+}
+
+// --daemon: fork and exit parent
+if (hasFlag("-d") || hasFlag("--daemon")) {
+  const childArgs = args.filter((a) => a !== "-d" && a !== "--daemon");
+  const child = spawn(process.execPath, [__filename, ...childArgs], {
+    detached: true,
+    stdio: ["ignore", "ignore", "ignore"],
+    env: { ...process.env },
+  });
+  child.unref();
+  fs.writeFileSync(PID_FILE, String(child.pid));
+  console.log(`Daemon started (PID ${child.pid})`);
+  console.log(`PID file: ${PID_FILE}`);
+  const port = getArg("-p", getArg("--port", process.env.PROXY_ACPX_PORT ?? "52088"));
+  const host = getArg("-H", getArg("--host", process.env.PROXY_ACPX_HOST ?? "127.0.0.1"));
+  console.log(`Listening on http://${host}:${port}`);
+  console.log(`Stop with: proxy-acpx-server --stop`);
+  process.exit(0);
+}
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
-const PORT = parseInt(process.env.PROXY_ACPX_PORT ?? "52088", 10);
-const HOST = process.env.PROXY_ACPX_HOST ?? "127.0.0.1";
-const MODEL_NAME = process.env.PROXY_ACPX_MODEL ?? "claude-code-proxy";
+const PORT = parseInt(getArg("-p", getArg("--port", process.env.PROXY_ACPX_PORT ?? "52088")), 10);
+const HOST = getArg("-H", getArg("--host", process.env.PROXY_ACPX_HOST ?? "127.0.0.1"));
+const MODEL_NAME = getArg("-m", getArg("--model", process.env.PROXY_ACPX_MODEL ?? "claude-code-proxy"));
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
