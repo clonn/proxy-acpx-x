@@ -202,34 +202,26 @@ proxy-acpx-server
 # Server running at http://127.0.0.1:52088
 ```
 
-Configure OpenClaw to use it as a model provider:
-
-```bash
-# Set the custom endpoint
-openclaw config set models.providers.claude-local.type "openai-compatible"
-openclaw config set models.providers.claude-local.baseUrl "http://127.0.0.1:52088/v1"
-openclaw config set models.providers.claude-local.apiKey "sk-dummy-key"
-
-# Set as default model
-openclaw models set claude-code-proxy
-```
-
-Or edit `~/.openclaw/openclaw.json` directly:
+Configure OpenClaw to use it as a model provider. Edit `~/.openclaw/openclaw.json` and add:
 
 ```json
 {
   "models": {
     "providers": {
       "claude-local": {
-        "type": "openai-compatible",
+        "api": "openai-completions",
         "baseUrl": "http://127.0.0.1:52088/v1",
         "apiKey": "sk-dummy-key",
-        "models": ["claude-code-proxy"]
+        "models": [{"id": "claude-code-proxy", "name": "Claude Code Proxy"}]
       }
-    },
-    "default": "claude-code-proxy"
+    }
   }
 }
+```
+
+Set as default model:
+```bash
+openclaw models set claude-code-proxy
 ```
 
 Verify:
