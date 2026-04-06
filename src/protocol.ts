@@ -192,7 +192,7 @@ export function buildClaudeArgs(options?: {
     "--include-partial-messages",
   ];
 
-  if (options?.bare !== false) {
+  if (options?.bare === true) {
     args.push("--bare");
   }
 

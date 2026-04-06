@@ -212,7 +212,7 @@ describe("parseNdjsonLine", () => {
 // ─── buildClaudeArgs ─────────────────────────────────────────────────────────
 
 describe("buildClaudeArgs", () => {
-  it("builds default args with bare and bypassPermissions", () => {
+  it("builds default args without bare and with bypassPermissions", () => {
     const args = buildClaudeArgs();
     expect(args).toContain("-p");
     expect(args).toContain("--input-format");
@@ -220,14 +220,14 @@ describe("buildClaudeArgs", () => {
     expect(args).toContain("--output-format");
     expect(args).toContain("--verbose");
     expect(args).toContain("--include-partial-messages");
-    expect(args).toContain("--bare");
+    expect(args).not.toContain("--bare");
     expect(args).toContain("--permission-mode");
     expect(args).toContain("bypassPermissions");
   });
 
-  it("can disable bare mode", () => {
-    const args = buildClaudeArgs({ bare: false });
-    expect(args).not.toContain("--bare");
+  it("can enable bare mode", () => {
+    const args = buildClaudeArgs({ bare: true });
+    expect(args).toContain("--bare");
   });
 
   it("can set custom permission mode", () => {

@@ -59,7 +59,6 @@ claude -p \
   --output-format stream-json \
   --verbose \
   --include-partial-messages \
-  --bare \
   --permission-mode bypassPermissions
 ```
 
@@ -70,7 +69,6 @@ claude -p \
 | `--output-format stream-json` | Emit NDJSON streaming events on stdout |
 | `--verbose` | Full turn-by-turn output |
 | `--include-partial-messages` | Emit `stream_event` with real-time text/tool deltas |
-| `--bare` | Skip hooks, plugins, MCP, CLAUDE.md for fast startup |
 | `--permission-mode bypassPermissions` | Auto-approve all tools (required for non-interactive ACP) |
 
 Reference: [Claude Code headless docs](https://code.claude.com/docs/en/headless)
@@ -306,7 +304,7 @@ node dist/gemini-adapter.js
 
 **Permission errors** — Claude uses `bypassPermissions`, Codex uses `--full-auto`, Gemini uses `--yolo`. For finer control, modify the spawn args.
 
-**Slow startup (Claude)** — Uses `--bare` to skip hooks/plugins. Remove if you need CLAUDE.md context.
+**Slow startup (Claude)** — Add `--bare` to `buildClaudeArgs({ bare: true })` in `src/protocol.ts` to skip hooks/plugins for faster startup (but this also skips OAuth auth).
 
 ## References
 
