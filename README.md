@@ -4,6 +4,43 @@
 
 ACP adapters and OpenAI-compatible HTTP proxy for routing traffic through **Claude Code CLI**, **Codex CLI**, or **Gemini CLI** — use your existing CLI subscription auth instead of separate API keys.
 
+## Quick Start
+
+```bash
+# 1. Install
+npm install -g proxy-acpx-x
+
+# 2. Authenticate Claude Code CLI
+claude auth login
+
+# 3. Start the proxy server (daemon mode)
+proxy-acpx-server -d
+
+# 4. Edit ~/.openclaw/openclaw.json — add models section:
+#    "models": {
+#      "providers": {
+#        "claude-local": {
+#          "api": "openai-completions",
+#          "baseUrl": "http://127.0.0.1:52088/v1",
+#          "apiKey": "sk-dummy-key",
+#          "models": [{"id": "claude-code-proxy", "name": "Claude Code Proxy"}]
+#        }
+#      }
+#    }
+
+# 5. Set as default model
+openclaw models set claude-code-proxy
+
+# 6. Test with curl
+curl http://127.0.0.1:52088/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"What is 2+2?"}],"stream":true}'
+
+# Done — talk to OpenClaw, all requests route through Claude Code CLI
+```
+
+---
+
 ## Supported Backends
 
 | Backend | ACP Adapter | HTTP Server | CLI Used |
