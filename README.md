@@ -195,17 +195,34 @@ gemini                      # first run triggers auth
 
 ### Step 3: Use as OpenClaw Model Provider (recommended)
 
-Start the OpenAI-compatible HTTP server:
+**3a. Start the server:**
 
 ```bash
+# Foreground (see logs)
 proxy-acpx-server
-# Server running at http://127.0.0.1:52088
+
+# Or as daemon (background)
+proxy-acpx-server -d
+
+# Custom port
+proxy-acpx-server -p 9000
+proxy-acpx-server -d -p 9000
 ```
 
-Configure OpenClaw to use it as a model provider. Edit `~/.openclaw/openclaw.json` and add:
+Server commands:
+```bash
+proxy-acpx-server --status   # check if daemon is running
+proxy-acpx-server --stop     # stop daemon
+proxy-acpx-server --help     # show all options
+```
+
+**3b. Edit `~/.openclaw/openclaw.json`** — add the `models` section:
 
 ```json
 {
+  "meta": { ... },
+  "commands": { ... },
+  "gateway": { ... },
   "models": {
     "providers": {
       "claude-local": {
@@ -219,15 +236,27 @@ Configure OpenClaw to use it as a model provider. Edit `~/.openclaw/openclaw.jso
 }
 ```
 
-Set as default model:
+> **Note:** Merge the `models` block into your existing config — don't replace the whole file. Keep your existing `meta`, `commands`, `gateway` sections as-is.
+
+> **Custom port?** If you used `-p 9000`, change `baseUrl` to `http://127.0.0.1:9000/v1`.
+
+**3c. Set as default model:**
+
 ```bash
 openclaw models set claude-code-proxy
 ```
 
-Verify:
+**3d. Verify:**
+
 ```bash
 openclaw models status
 ```
+
+You should see `claude-code-proxy` listed as the default model.
+
+**3e. Test:**
+
+Talk to OpenClaw — all requests now route through Claude Code CLI with your subscription auth.
 
 Then just talk to OpenClaw — all requests route through Claude Code CLI.
 
