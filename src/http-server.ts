@@ -233,7 +233,124 @@ function nonStreamResponse(content: string, model: string, usage: { input: numbe
   });
 }
 
-// ─── Claude CLI integration ──────────────────────────────────────────────────
+// ─── Persistent Claude CLI process ───────────────────────────────────────────
+//
+// Keep a single long-running Claude CLI process with stream-json I/O.
+// This avoids the 15-20s cold start per request.
+// Messages are sent via stdin, responses read from stdout.
+
+let claudeProc: ChildProcess | null = null;
+let claudeReady = false;
+let currentRes: http.ServerResponse | null = null;
+let currentModel: string = MODEL_NAME;
+let hasStreamedText = false;
+let resultSent = false;
+
+function getClaudeArgs(): string[] {
+  const cliArgs = [
+    "-p",
+    "--input-format", "stream-json",
+    "--output-format", "stream-json",
+    "--verbose",
+    "--include-partial-messages",
+    "--permission-mode", "bypassPermissions",
+  ];
+  if (BARE_MODE) cliArgs.push("--bare");
+  return cliArgs;
+}
+
+function ensureClaude(): void {
+  if (claudeProc && !claudeProc.killed) return;
+
+  const cliArgs = getClaudeArgs();
+  log(`Spawning persistent Claude process (bare=${BARE_MODE})`);
+  log(`Args: claude ${cliArgs.join(" ")}`);
+
+  claudeProc = spawn("claude", cliArgs, {
+    stdio: ["pipe", "pipe", "pipe"],
+    env: { ...process.env },
+  });
+
+  claudeProc.on("error", (err) => {
+    log(`Claude spawn error: ${err.message}`);
+    claudeProc = null;
+    claudeReady = false;
+    if (currentRes && !currentRes.writableEnded) {
+      currentRes.write(`data: ${JSON.stringify({ error: { message: err.message } })}\n\n`);
+      currentRes.end();
+      currentRes = null;
+    }
+  });
+
+  claudeProc.on("exit", (code, signal) => {
+    log(`Claude process exited (code=${code}, signal=${signal})`);
+    claudeProc = null;
+    claudeReady = false;
+    if (currentRes && !currentRes.writableEnded) {
+      if (!resultSent) {
+        currentRes.write(sseDone(currentModel));
+      }
+      currentRes.end();
+      currentRes = null;
+    }
+  });
+
+  if (claudeProc.stdout) {
+    const rl = createInterface({ input: claudeProc.stdout });
+    rl.on("line", (line) => {
+      if (!line.trim()) return;
+      let msg: ClaudeStreamOutput;
+      try {
+        msg = JSON.parse(line);
+      } catch {
+        return;
+      }
+      handleClaudeOutput(msg);
+    });
+  }
+
+  if (claudeProc.stderr) {
+    const errRl = createInterface({ input: claudeProc.stderr });
+    errRl.on("line", (line) => log(`[claude] ${line}`));
+  }
+
+  claudeReady = true;
+}
+
+function handleClaudeOutput(msg: ClaudeStreamOutput): void {
+  // System init — Claude is ready
+  if (msg.type === "system" && msg.subtype === "init") {
+    log(`Claude session ready: ${msg.session_id}`);
+    return;
+  }
+
+  // No active response — skip
+  if (!currentRes || currentRes.writableEnded || resultSent) return;
+
+  if (msg.type === "stream_event" && msg.event) {
+    const evt = msg.event;
+    if (evt.type === "content_block_delta" && evt.delta?.type === "text_delta" && evt.delta.text) {
+      currentRes.write(sseChunk(String(evt.delta.text), currentModel));
+      hasStreamedText = true;
+    }
+  } else if (msg.type === "assistant" && msg.message?.content && !hasStreamedText) {
+    for (const block of msg.message.content) {
+      if (block.type === "text" && block.text) {
+        currentRes.write(sseChunk(String(block.text), currentModel));
+      }
+    }
+  } else if (msg.type === "result") {
+    if (!hasStreamedText && msg.result && typeof msg.result === "string") {
+      currentRes.write(sseChunk(msg.result, currentModel));
+    }
+    resultSent = true;
+    currentRes.write(sseDone(currentModel));
+    currentRes.end();
+    currentRes = null;
+  }
+}
+
+// ─── Request handlers ────────────────────────────────────────────────────────
 
 function handleStreamingRequest(
   prompt: string,
@@ -247,90 +364,27 @@ function handleStreamingRequest(
     "Access-Control-Allow-Origin": "*",
   });
 
-  const cliArgs = [
-    "-p",
-    "--input-format", "stream-json",
-    "--output-format", "stream-json",
-    "--verbose",
-    "--include-partial-messages",
-    "--permission-mode", "bypassPermissions",
-  ];
+  // Reset per-request state
+  currentRes = res;
+  currentModel = model;
+  hasStreamedText = false;
+  resultSent = false;
 
-  if (BARE_MODE) {
-    cliArgs.push("--bare");
+  ensureClaude();
+
+  if (!claudeProc?.stdin?.writable) {
+    log("Claude stdin not writable, respawning");
+    claudeProc = null;
+    ensureClaude();
   }
 
-  log(`Spawning claude for streaming (bare=${BARE_MODE}): ${prompt.slice(0, 80)}`);
-  const proc = spawn("claude", cliArgs, {
-    stdio: ["pipe", "pipe", "pipe"],
-    env: { ...process.env },
-  });
-
-  proc.on("error", (err) => {
-    log(`Claude spawn error: ${err.message}`);
-    res.write(`data: ${JSON.stringify({ error: { message: err.message } })}\n\n`);
-    res.end();
-  });
-
-  // Send prompt via stdin
+  log(`Sending prompt to Claude: ${prompt.slice(0, 80)}`);
   const userMsg = JSON.stringify({ type: "user", message: { role: "user", content: prompt } });
-  proc.stdin!.write(userMsg + "\n");
-  proc.stdin!.end();
-
-  // Parse Claude output and forward as SSE
-  let hasStreamedText = false;
-  let resultSent = false;
-  const rl = createInterface({ input: proc.stdout! });
-  rl.on("line", (line) => {
-    if (!line.trim() || resultSent) return;
-    let msg: ClaudeStreamOutput;
-    try {
-      msg = JSON.parse(line);
-    } catch {
-      return;
-    }
-
-    log(`Claude output: type=${msg.type} subtype=${msg.subtype ?? ""}`);
-
-    if (msg.type === "stream_event" && msg.event) {
-      const evt = msg.event;
-      if (evt.type === "content_block_delta" && evt.delta?.type === "text_delta" && evt.delta.text) {
-        res.write(sseChunk(String(evt.delta.text), model));
-        hasStreamedText = true;
-      }
-    } else if (msg.type === "assistant" && msg.message?.content && !hasStreamedText) {
-      // Complete message fallback — only if no stream_events were received
-      for (const block of msg.message.content) {
-        if (block.type === "text" && block.text) {
-          res.write(sseChunk(String(block.text), model));
-        }
-      }
-    } else if (msg.type === "result") {
-      // If no text was streamed at all, use the result text
-      if (!hasStreamedText && msg.result && typeof msg.result === "string") {
-        res.write(sseChunk(msg.result, model));
-      }
-      resultSent = true;
-      res.write(sseDone(model));
-      res.end();
-    }
-  });
-
-  if (proc.stderr) {
-    const errRl = createInterface({ input: proc.stderr });
-    errRl.on("line", (line) => log(`[claude] ${line}`));
-  }
-
-  proc.on("exit", () => {
-    if (!res.writableEnded) {
-      res.write(sseDone(model));
-      res.end();
-    }
-  });
+  claudeProc!.stdin!.write(userMsg + "\n");
 
   // Handle client disconnect
   res.on("close", () => {
-    proc.kill("SIGTERM");
+    currentRes = null;
   });
 }
 
@@ -339,29 +393,23 @@ function handleNonStreamingRequest(
   model: string,
   res: http.ServerResponse
 ): void {
+  // For non-streaming, spawn a one-shot process (simpler than collecting from persistent)
   const cliArgs = [
     "-p",
     "--output-format", "json",
     "--permission-mode", "bypassPermissions",
   ];
-
-  if (BARE_MODE) {
-    cliArgs.push("--bare");
-  }
-
+  if (BARE_MODE) cliArgs.push("--bare");
   cliArgs.push(prompt);
 
-  log(`Spawning claude for non-streaming (bare=${BARE_MODE}): ${prompt.slice(0, 80)}`);
+  log(`Spawning claude one-shot for non-streaming: ${prompt.slice(0, 80)}`);
   const proc = spawn("claude", cliArgs, {
     stdio: ["pipe", "pipe", "pipe"],
     env: { ...process.env },
   });
 
   let output = "";
-
-  proc.stdout!.on("data", (data) => {
-    output += data.toString();
-  });
+  proc.stdout!.on("data", (data) => { output += data.toString(); });
 
   proc.on("error", (err) => {
     log(`Claude spawn error: ${err.message}`);
@@ -377,16 +425,10 @@ function handleNonStreamingRequest(
         input: parsed.usage?.input_tokens ?? 0,
         output: parsed.usage?.output_tokens ?? 0,
       };
-      res.writeHead(200, {
-        "Content-Type": "application/json",
-        "Access-Control-Allow-Origin": "*",
-      });
+      res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
       res.end(nonStreamResponse(content, model, usage));
     } catch {
-      res.writeHead(200, {
-        "Content-Type": "application/json",
-        "Access-Control-Allow-Origin": "*",
-      });
+      res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
       res.end(nonStreamResponse(output.trim(), model, { input: 0, output: 0 }));
     }
   });
@@ -468,6 +510,7 @@ const server = http.createServer((req, res) => {
 server.listen(PORT, HOST, () => {
   log(`OpenAI-compatible server running at http://${HOST}:${PORT}`);
   log(`Model: ${MODEL_NAME}`);
+  log(`Bare mode: ${BARE_MODE}`);
   log(`Endpoints:`);
   log(`  GET  /v1/models`);
   log(`  POST /v1/chat/completions`);
@@ -475,4 +518,8 @@ server.listen(PORT, HOST, () => {
   log(`  Base URL: http://${HOST}:${PORT}/v1`);
   log(`  API Key: sk-dummy-key`);
   log(`  Model: ${MODEL_NAME}`);
+
+  // Pre-spawn Claude CLI so first request is fast
+  log("Pre-warming Claude CLI process...");
+  ensureClaude();
 });
