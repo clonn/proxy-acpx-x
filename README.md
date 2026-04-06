@@ -1,6 +1,6 @@
 # proxy-acpx-x
 
-ACP adapters for routing OpenClaw/acpx traffic through **Claude Code CLI** or **Codex CLI**, enabling subscription-based authentication instead of requiring separate API keys.
+ACP adapters for routing OpenClaw/acpx traffic through **Claude Code CLI**, **Codex CLI**, or **Gemini CLI**, enabling subscription-based authentication instead of requiring separate API keys.
 
 ## Supported Backends
 
@@ -8,6 +8,7 @@ ACP adapters for routing OpenClaw/acpx traffic through **Claude Code CLI** or **
 |---------|---------|----------|
 | **Claude Code** | `proxy-acpx-claude` | `claude -p --input-format stream-json --output-format stream-json` |
 | **Codex CLI** | `proxy-acpx-codex` | `codex exec --json --full-auto` |
+| **Gemini CLI** | `proxy-acpx-gemini` | `gemini --output-format stream-json --yolo` |
 
 ## Architecture
 
@@ -17,11 +18,14 @@ Claude Code backend:
 
 Codex CLI backend:
   OpenClaw → acpx → proxy-acpx-codex  → codex exec (JSON Lines)  → OpenAI API
+
+Gemini CLI backend:
+  OpenClaw → acpx → proxy-acpx-gemini → gemini CLI (stream-json) → Google AI API
 ```
 
-Both adapters are thin NDJSON translators. The ACP side is identical — only the CLI protocol differs.
+All adapters are thin NDJSON translators. The ACP side is identical — only the CLI protocol differs.
 
-> **Naming:** `proxy-acpx-x` where `x` is the target CLI — `proxy-acpx-claude`, `proxy-acpx-codex`, etc.
+> **Naming:** `proxy-acpx-x` where `x` is the target CLI — `proxy-acpx-claude`, `proxy-acpx-codex`, `proxy-acpx-gemini`, etc.
 
 ---
 
@@ -115,11 +119,53 @@ Reference: [Codex CLI docs](https://developers.openai.com/codex/cli)
 
 ---
 
+## Gemini CLI Adapter
+
+### Protocol Mapping
+
+**Input: ACP → Gemini CLI** (spawns `gemini` per prompt)
+
+| ACP (from acpx)                           | Gemini CLI                                            |
+| ----------------------------------------- | ----------------------------------------------------- |
+| `session/prompt { prompt: [{text:"…"}] }` | `gemini --output-format stream-json --yolo "…"`       |
+| `session/prompt` (2nd+)                   | `gemini --output-format stream-json --yolo --resume latest "…"` |
+| `session/cancel`                          | SIGTERM to child process                              |
+| `session/close`                           | SIGTERM + reset session                               |
+
+**Output: Gemini CLI stream-json → ACP**
+
+| Gemini stream-json event                                    | ACP (to acpx)                    |
+| ----------------------------------------------------------- | -------------------------------- |
+| `{ type: "message", role: "assistant", content, delta }`    | `session/update { agent_message_chunk }` |
+| `{ type: "tool_use", tool_name, tool_id, parameters }`     | `session/update { tool_call }`   |
+| `{ type: "tool_result", tool_id, status, output }`         | `session/update { tool_result }` |
+| `{ type: "result", status: "success", stats }`             | prompt response (stopReason: end_turn) |
+| `{ type: "init", session_id, model }`                      | captured for session resume      |
+| `{ type: "error", message }`                               | prompt response (stopReason: error) |
+
+### CLI Flags
+
+```bash
+gemini --output-format stream-json --yolo "<prompt>"
+gemini --output-format stream-json --yolo --resume latest "<follow-up>"
+```
+
+| Flag | Purpose |
+| ---- | ------- |
+| `--output-format stream-json` | NDJSON streaming events on stdout |
+| `--yolo` | Auto-approve all tool calls (required for non-interactive ACP) |
+| `--resume latest` | Continue previous session for multi-turn |
+
+Reference: [Gemini CLI docs](https://geminicli.com/docs/cli/headless) | [GitHub](https://github.com/google-gemini/gemini-cli)
+
+---
+
 ## Prerequisites
 
 - **Node.js** >= 18
 - **Claude Code CLI** (`claude` in PATH) — for Claude adapter
 - **Codex CLI** (`codex` in PATH) — for Codex adapter
+- **Gemini CLI** (`gemini` in PATH) — for Gemini adapter
 - **OpenClaw** with acpx plugin
 
 ## Installation
@@ -149,6 +195,12 @@ acpx config set agents.claude-native.command "proxy-acpx-claude"
 acpx config set agents.codex-native.command "proxy-acpx-codex"
 ```
 
+### Gemini CLI backend
+
+```bash
+acpx config set agents.gemini-native.command "proxy-acpx-gemini"
+```
+
 ### OpenClaw config (`~/.openclaw/config.json`)
 
 ```json
@@ -172,6 +224,9 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | node dist/ad
 
 # Codex adapter
 echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | node dist/codex-adapter.js
+
+# Gemini adapter
+echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | node dist/gemini-adapter.js
 ```
 
 ## Usage
@@ -186,6 +241,7 @@ You: "Refactor this function"
 ```
 /acp spawn claude-native --mode persistent --thread auto
 /acp spawn codex-native --mode persistent --thread auto
+/acp spawn gemini-native --mode persistent --thread auto
 ```
 
 **Common commands:**
@@ -208,7 +264,7 @@ npm run dev          # Run Claude adapter with ts-node
 ## Testing
 
 ```bash
-npm test             # Run all unit tests (vitest, 40 tests)
+npm test             # Run all unit tests (vitest, 97 tests)
 npm run test:watch   # Run tests in watch mode
 npm run test:smoke   # Run E2E smoke tests against Claude adapter
 ```
@@ -216,8 +272,10 @@ npm run test:smoke   # Run E2E smoke tests against Claude adapter
 **Unit tests:**
 - `test/protocol.test.ts` — 24 tests for ACP ↔ Claude Code stream-json translation
 - `test/codex-protocol.test.ts` — 16 tests for ACP ↔ Codex CLI translation
+- `test/gemini-protocol.test.ts` — 15 tests for ACP ↔ Gemini CLI translation
+- `test/adapter-acp.test.ts` — 42 integration tests (14 per adapter, spawned as child processes)
 
-**Smoke tests** (`test/smoke.sh`) — 5 tests against the built Claude adapter process.
+**Smoke tests** (`test/smoke.sh`) — 24 shell tests (8 per adapter).
 
 ### Manual E2E test
 
@@ -231,17 +289,22 @@ node dist/adapter.js
 
 # Codex adapter
 node dist/codex-adapter.js
-# paste: {"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}
-# paste: {"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"What is 2+2?"}]}}
+
+# Gemini adapter
+node dist/gemini-adapter.js
+
+# Then paste for any adapter:
+# {"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}
+# {"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"What is 2+2?"}]}}
 ```
 
 ## Troubleshooting
 
-**"Failed to spawn claude/codex"** — Ensure the CLI is in your PATH. Run `which claude` or `which codex`.
+**"Failed to spawn claude/codex/gemini"** — Ensure the CLI is in your PATH. Run `which claude`, `which codex`, or `which gemini`.
 
-**No output** — Check stderr logs (prefixed `[proxy-acpx-x]` or `[proxy-acpx-x:codex]`).
+**No output** — Check stderr logs (prefixed `[proxy-acpx-x]`, `[proxy-acpx-x:codex]`, or `[proxy-acpx-x:gemini]`).
 
-**Permission errors** — Claude adapter uses `bypassPermissions`, Codex adapter uses `--full-auto`. For finer control, modify the spawn args.
+**Permission errors** — Claude uses `bypassPermissions`, Codex uses `--full-auto`, Gemini uses `--yolo`. For finer control, modify the spawn args.
 
 **Slow startup (Claude)** — Uses `--bare` to skip hooks/plugins. Remove if you need CLAUDE.md context.
 
@@ -253,6 +316,9 @@ node dist/codex-adapter.js
 - [Codex CLI features](https://developers.openai.com/codex/cli/features)
 - [Codex CLI reference](https://developers.openai.com/codex/cli/reference)
 - [Codex non-interactive mode](https://developers.openai.com/codex/noninteractive)
+- [Gemini CLI headless mode](https://geminicli.com/docs/cli/headless)
+- [Gemini CLI configuration](https://geminicli.com/docs/reference/configuration/)
+- [Gemini CLI GitHub](https://github.com/google-gemini/gemini-cli)
 
 ## License
 

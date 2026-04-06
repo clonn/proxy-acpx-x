@@ -12,6 +12,7 @@ set -uo pipefail
 
 CLAUDE_ADAPTER="node dist/adapter.js"
 CODEX_ADAPTER="node dist/codex-adapter.js"
+GEMINI_ADAPTER="node dist/gemini-adapter.js"
 PASSED=0
 FAILED=0
 TARGET="${1:-all}"
@@ -183,11 +184,13 @@ echo ""
 case "$TARGET" in
   claude) run_adapter_tests "Claude (proxy-acpx-claude)" "$CLAUDE_ADAPTER" "proxy-acpx-x" ;;
   codex)  run_adapter_tests "Codex (proxy-acpx-codex)" "$CODEX_ADAPTER" "proxy-acpx-x-codex" ;;
+  gemini) run_adapter_tests "Gemini (proxy-acpx-gemini)" "$GEMINI_ADAPTER" "proxy-acpx-x-gemini" ;;
   all)
     run_adapter_tests "Claude (proxy-acpx-claude)" "$CLAUDE_ADAPTER" "proxy-acpx-x"
     run_adapter_tests "Codex (proxy-acpx-codex)" "$CODEX_ADAPTER" "proxy-acpx-x-codex"
+    run_adapter_tests "Gemini (proxy-acpx-gemini)" "$GEMINI_ADAPTER" "proxy-acpx-x-gemini"
     ;;
-  *) echo "Usage: $0 [claude|codex|all]"; exit 1 ;;
+  *) echo "Usage: $0 [claude|codex|gemini|all]"; exit 1 ;;
 esac
 
 echo "=============================="

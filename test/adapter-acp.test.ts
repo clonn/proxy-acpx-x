@@ -9,6 +9,7 @@ import { resolve } from "path";
 
 const CLAUDE_ADAPTER = resolve(__dirname, "../dist/adapter.js");
 const CODEX_ADAPTER = resolve(__dirname, "../dist/codex-adapter.js");
+const GEMINI_ADAPTER = resolve(__dirname, "../dist/gemini-adapter.js");
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -268,3 +269,4 @@ function testAcpAdapter(name: string, scriptPath: string, serverInfoName: string
 
 testAcpAdapter("Claude", CLAUDE_ADAPTER, "proxy-acpx-x");
 testAcpAdapter("Codex", CODEX_ADAPTER, "proxy-acpx-x-codex");
+testAcpAdapter("Gemini", GEMINI_ADAPTER, "proxy-acpx-x-gemini");
