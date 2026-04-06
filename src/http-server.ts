@@ -44,6 +44,7 @@ Options:
   -H, --host <host>    Host to bind to (default: 127.0.0.1)
   -m, --model <name>   Model name to advertise (default: claude-code-proxy)
   -d, --daemon         Run as background daemon (writes PID to ~/.proxy-acpx-server.pid)
+  --bare               Use --bare mode for faster Claude startup (requires ANTHROPIC_API_KEY)
   --stop               Stop a running daemon
   --status             Check if daemon is running
   -h, --help           Show this help
@@ -52,6 +53,7 @@ Environment variables:
   PROXY_ACPX_PORT      Same as --port
   PROXY_ACPX_HOST      Same as --host
   PROXY_ACPX_MODEL     Same as --model
+  ANTHROPIC_API_KEY    Required when using --bare mode
 
 Examples:
   proxy-acpx-server                    # Start on port 52088
@@ -114,6 +116,7 @@ if (hasFlag("-d") || hasFlag("--daemon")) {
 const PORT = parseInt(getArg("-p", getArg("--port", process.env.PROXY_ACPX_PORT ?? "52088")), 10);
 const HOST = getArg("-H", getArg("--host", process.env.PROXY_ACPX_HOST ?? "127.0.0.1"));
 const MODEL_NAME = getArg("-m", getArg("--model", process.env.PROXY_ACPX_MODEL ?? "claude-code-proxy"));
+const BARE_MODE = hasFlag("--bare");
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -244,7 +247,7 @@ function handleStreamingRequest(
     "Access-Control-Allow-Origin": "*",
   });
 
-  const args = [
+  const cliArgs = [
     "-p",
     "--input-format", "stream-json",
     "--output-format", "stream-json",
@@ -253,8 +256,12 @@ function handleStreamingRequest(
     "--permission-mode", "bypassPermissions",
   ];
 
-  log(`Spawning claude for streaming: ${prompt.slice(0, 80)}`);
-  const proc = spawn("claude", args, {
+  if (BARE_MODE) {
+    cliArgs.push("--bare");
+  }
+
+  log(`Spawning claude for streaming (bare=${BARE_MODE}): ${prompt.slice(0, 80)}`);
+  const proc = spawn("claude", cliArgs, {
     stdio: ["pipe", "pipe", "pipe"],
     env: { ...process.env },
   });
@@ -332,15 +339,20 @@ function handleNonStreamingRequest(
   model: string,
   res: http.ServerResponse
 ): void {
-  const args = [
+  const cliArgs = [
     "-p",
     "--output-format", "json",
     "--permission-mode", "bypassPermissions",
-    prompt,
   ];
 
-  log(`Spawning claude for non-streaming: ${prompt.slice(0, 80)}`);
-  const proc = spawn("claude", args, {
+  if (BARE_MODE) {
+    cliArgs.push("--bare");
+  }
+
+  cliArgs.push(prompt);
+
+  log(`Spawning claude for non-streaming (bare=${BARE_MODE}): ${prompt.slice(0, 80)}`);
+  const proc = spawn("claude", cliArgs, {
     stdio: ["pipe", "pipe", "pipe"],
     env: { ...process.env },
   });
