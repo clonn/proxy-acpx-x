@@ -168,9 +168,11 @@ function contentToString(content: ChatMessage["content"]): string {
   return String(content);
 }
 
-// ~4 chars per token; leave room for Claude system prompt + tools + response
-// OpenClaw sends large system prompts with tooling defs, so be conservative
-const MAX_PROMPT_CHARS = 120_000;
+// Context budget: the persistent Claude CLI process accumulates context across
+// requests in a session. Each prompt we send adds to the session's context window.
+// Keep prompts small so the session lasts longer before needing rotation.
+const MAX_PROMPT_CHARS = 80_000;
+const MAX_CONVERSATION_TURNS = 10;  // Keep only the last N user/assistant pairs
 
 function extractPrompt(messages: ChatMessage[]): string {
   // Separate system messages (always kept) from conversation history
@@ -190,20 +192,27 @@ function extractPrompt(messages: ChatMessage[]): string {
   const systemText = systemParts.join("\n\n");
   const budget = MAX_PROMPT_CHARS - systemText.length;
 
-  // Walk conversation from newest to oldest, keeping what fits
+  // First pass: cap to last N turns (prevents sending 146+ old Slack messages)
+  const recentConv = convParts.slice(-MAX_CONVERSATION_TURNS * 2);
+  if (convParts.length > recentConv.length) {
+    log(`Turn limit: kept last ${recentConv.length} messages, skipped ${convParts.length - recentConv.length} older ones`);
+  }
+
+  // Second pass: fit within character budget (newest first)
   const kept: string[] = [];
   let used = 0;
-  for (let i = convParts.length - 1; i >= 0; i--) {
-    const { role, text } = convParts[i];
+  for (let i = recentConv.length - 1; i >= 0; i--) {
+    const { role, text } = recentConv[i];
     const formatted = role === "assistant" ? `[Previous assistant response] ${text}` : text;
     if (used + formatted.length > budget) {
-      log(`Prompt truncated: dropped ${i + 1} older message(s) to fit within ${MAX_PROMPT_CHARS} chars`);
+      log(`Prompt truncated: dropped ${i + 1} more message(s) to fit within char budget`);
       break;
     }
     kept.unshift(formatted);
     used += formatted.length;
   }
 
+  log(`Prompt: system=${systemText.length} chars, conversation=${used} chars (${kept.length} messages)`);
   const allParts = systemText ? [systemText, ...kept] : kept;
   return allParts.join("\n\n");
 }
