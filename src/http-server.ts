@@ -168,8 +168,9 @@ function contentToString(content: ChatMessage["content"]): string {
   return String(content);
 }
 
-// ~4 chars per token; 128k context minus headroom for response + system prompt
-const MAX_PROMPT_CHARS = 300_000;
+// ~4 chars per token; leave room for Claude system prompt + tools + response
+// OpenClaw sends large system prompts with tooling defs, so be conservative
+const MAX_PROMPT_CHARS = 120_000;
 
 function extractPrompt(messages: ChatMessage[]): string {
   // Separate system messages (always kept) from conversation history
@@ -268,6 +269,13 @@ let currentRes: http.ServerResponse | null = null;
 let currentModel: string = MODEL_NAME;
 let hasStreamedText = false;
 let resultSent = false;
+let requestCount = 0;
+
+// Respawn after N requests to prevent context window accumulation
+const MAX_REQUESTS_PER_SESSION = 20;
+
+// Regex to detect context overflow errors from Claude CLI
+const CONTEXT_OVERFLOW_RE = /prompt is too long|context.length.exceeded|request_too_large|exceeds.*context.window|context.overflow/i;
 
 function getClaudeArgs(): string[] {
   const cliArgs = [
@@ -282,7 +290,22 @@ function getClaudeArgs(): string[] {
   return cliArgs;
 }
 
+function killClaude(): void {
+  if (claudeProc && !claudeProc.killed) {
+    log("Killing Claude process for session rotation");
+    claudeProc.kill("SIGTERM");
+  }
+  claudeProc = null;
+  claudeReady = false;
+  requestCount = 0;
+}
+
 function ensureClaude(): void {
+  // Rotate session if too many requests have accumulated context
+  if (claudeProc && !claudeProc.killed && requestCount >= MAX_REQUESTS_PER_SESSION) {
+    log(`Session rotation: ${requestCount} requests reached limit of ${MAX_REQUESTS_PER_SESSION}`);
+    killClaude();
+  }
   if (claudeProc && !claudeProc.killed) return;
 
   const cliArgs = getClaudeArgs();
@@ -334,7 +357,21 @@ function ensureClaude(): void {
 
   if (claudeProc.stderr) {
     const errRl = createInterface({ input: claudeProc.stderr });
-    errRl.on("line", (line) => log(`[claude] ${line}`));
+    errRl.on("line", (line) => {
+      log(`[claude] ${line}`);
+      // Detect context overflow — send error to client and schedule respawn
+      if (CONTEXT_OVERFLOW_RE.test(line)) {
+        log("Context overflow detected — will respawn Claude process");
+        if (currentRes && !currentRes.writableEnded) {
+          currentRes.write(sseChunk("I'm sorry, the conversation has grown too long. Starting a fresh session — please resend your message.", currentModel));
+          resultSent = true;
+          currentRes.write(sseDone(currentModel));
+          currentRes.end();
+          currentRes = null;
+        }
+        killClaude();
+      }
+    });
   }
 
   claudeReady = true;
@@ -345,6 +382,23 @@ function handleClaudeOutput(msg: ClaudeStreamOutput): void {
   if (msg.type === "system" && msg.subtype === "init") {
     log(`Claude session ready: ${msg.session_id}`);
     return;
+  }
+
+  // Detect API errors that indicate context overflow
+  if (msg.type === "system" && msg.subtype === "api_retry") {
+    const errType = (msg as Record<string, unknown>).error as string | undefined;
+    if (errType === "invalid_request") {
+      log("API invalid_request during retry — likely context overflow, respawning");
+      if (currentRes && !currentRes.writableEnded && !resultSent) {
+        currentRes.write(sseChunk("Conversation context exceeded — starting fresh session.", currentModel));
+        resultSent = true;
+        currentRes.write(sseDone(currentModel));
+        currentRes.end();
+        currentRes = null;
+      }
+      killClaude();
+      return;
+    }
   }
 
   // No active response — skip
@@ -401,7 +455,8 @@ function handleStreamingRequest(
     ensureClaude();
   }
 
-  log(`Sending prompt to Claude: ${prompt.slice(0, 80)}`);
+  requestCount++;
+  log(`Sending prompt to Claude (req #${requestCount}/${MAX_REQUESTS_PER_SESSION}): ${prompt.slice(0, 80)}`);
   const userMsg = JSON.stringify({ type: "user", message: { role: "user", content: prompt } });
   claudeProc!.stdin!.write(userMsg + "\n");
 
