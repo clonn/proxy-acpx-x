@@ -144,7 +144,7 @@ interface ClaudeStreamOutput {
     message?: { usage?: { input_tokens?: number; output_tokens?: number } };
   };
   message?: {
-    content?: Array<{ type: string; text?: string }>;
+    content?: Array<{ type: string; text?: string; name?: string; input?: unknown; id?: string }>;
   };
   result?: string;
   session_id?: string;
@@ -206,6 +206,43 @@ function extractPrompt(messages: ChatMessage[]): string {
 
   const allParts = systemText ? [systemText, ...kept] : kept;
   return allParts.join("\n\n");
+}
+
+function formatToolSummary(toolName: string, rawInput: string): string {
+  let detail = "";
+  try {
+    const input = JSON.parse(rawInput);
+    if (toolName === "Read" && input.file_path) {
+      detail = input.file_path;
+    } else if (toolName === "Edit" && input.file_path) {
+      detail = input.file_path;
+    } else if (toolName === "Write" && input.file_path) {
+      detail = input.file_path;
+    } else if (toolName === "Bash" && input.command) {
+      detail = input.command.length > 80 ? input.command.slice(0, 80) + "…" : input.command;
+    } else if (toolName === "Glob" && input.pattern) {
+      detail = input.pattern;
+    } else if (toolName === "Grep" && input.pattern) {
+      detail = input.pattern;
+    } else if (toolName === "WebFetch" && input.url) {
+      detail = input.url;
+    } else if (toolName === "WebSearch" && input.query) {
+      detail = input.query;
+    } else {
+      // Generic: show first meaningful field
+      const keys = Object.keys(input);
+      if (keys.length > 0) {
+        const val = String(input[keys[0]]);
+        detail = val.length > 60 ? val.slice(0, 60) + "…" : val;
+      }
+    }
+  } catch {
+    // Input wasn't valid JSON
+    if (rawInput.length > 0) {
+      detail = rawInput.length > 60 ? rawInput.slice(0, 60) + "…" : rawInput;
+    }
+  }
+  return `\n🔧 **${toolName}**${detail ? `: ${detail}` : ""}\n`;
 }
 
 function sseChunk(content: string, model: string): string {
@@ -270,6 +307,11 @@ let currentModel: string = MODEL_NAME;
 let hasStreamedText = false;
 let resultSent = false;
 let requestCount = 0;
+
+// Track current tool call for surfacing to client
+let currentToolName: string | null = null;
+let currentToolInput = "";
+let toolCallsSummary: string[] = [];
 
 // Respawn after N requests to prevent context window accumulation
 const MAX_REQUESTS_PER_SESSION = 20;
@@ -406,17 +448,59 @@ function handleClaudeOutput(msg: ClaudeStreamOutput): void {
 
   if (msg.type === "stream_event" && msg.event) {
     const evt = msg.event;
+
+    // Tool call started — track it
+    if (evt.type === "content_block_start" && evt.content_block?.type === "tool_use") {
+      currentToolName = evt.content_block.name ?? "unknown";
+      currentToolInput = "";
+      log(`Tool starting: ${currentToolName}`);
+    }
+
+    // Tool input accumulation
+    if (evt.type === "content_block_delta" && evt.delta?.type === "input_json_delta" && evt.delta.partial_json) {
+      currentToolInput += evt.delta.partial_json;
+    }
+
+    // Tool call finished — surface it as visible text
+    if (evt.type === "content_block_stop" && currentToolName) {
+      const toolLabel = formatToolSummary(currentToolName, currentToolInput);
+      toolCallsSummary.push(toolLabel);
+      currentRes.write(sseChunk(toolLabel, currentModel));
+      hasStreamedText = true;
+      currentToolName = null;
+      currentToolInput = "";
+    }
+
+    // Regular text streaming
     if (evt.type === "content_block_delta" && evt.delta?.type === "text_delta" && evt.delta.text) {
+      // If we previously streamed tool summaries, add a separator before the response text
+      if (toolCallsSummary.length > 0 && !hasStreamedText) {
+        currentRes.write(sseChunk("\n\n---\n\n", currentModel));
+      }
       currentRes.write(sseChunk(String(evt.delta.text), currentModel));
       hasStreamedText = true;
     }
-  } else if (msg.type === "assistant" && msg.message?.content && !hasStreamedText) {
+  } else if (msg.type === "assistant" && msg.message?.content) {
+    // Full assistant message — extract both tool use and text blocks
     for (const block of msg.message.content) {
-      if (block.type === "text" && block.text) {
+      if (block.type === "tool_use" && block.name) {
+        const inputStr = block.input ? JSON.stringify(block.input) : "";
+        const toolLabel = formatToolSummary(block.name, inputStr);
+        toolCallsSummary.push(toolLabel);
+        currentRes.write(sseChunk(toolLabel, currentModel));
+        hasStreamedText = true;
+      } else if (block.type === "tool_result" && block.text) {
+        // Truncate long tool results but show a preview
+        const preview = block.text.length > 200 ? block.text.slice(0, 200) + "…" : block.text;
+        currentRes.write(sseChunk(`\n> ${preview}\n\n`, currentModel));
+        hasStreamedText = true;
+      } else if (block.type === "text" && block.text) {
         currentRes.write(sseChunk(String(block.text), currentModel));
+        hasStreamedText = true;
       }
     }
   } else if (msg.type === "result") {
+    // Stream final result text if we haven't streamed anything yet
     if (!hasStreamedText && msg.result && typeof msg.result === "string") {
       currentRes.write(sseChunk(msg.result, currentModel));
     }
@@ -424,6 +508,8 @@ function handleClaudeOutput(msg: ClaudeStreamOutput): void {
     currentRes.write(sseDone(currentModel));
     currentRes.end();
     currentRes = null;
+    // Reset tool tracking for next request
+    toolCallsSummary = [];
   }
 }
 
@@ -446,6 +532,9 @@ function handleStreamingRequest(
   currentModel = model;
   hasStreamedText = false;
   resultSent = false;
+  currentToolName = null;
+  currentToolInput = "";
+  toolCallsSummary = [];
 
   ensureClaude();
 
