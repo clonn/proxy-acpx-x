@@ -489,19 +489,15 @@ function handleClaudeOutput(msg: ClaudeStreamOutput): void {
       currentRes.write(sseChunk(String(evt.delta.text), currentModel));
       hasStreamedText = true;
     }
-  } else if (msg.type === "assistant" && msg.message?.content) {
-    // Full assistant message — extract both tool use and text blocks
+  } else if (msg.type === "assistant" && msg.message?.content && !hasStreamedText) {
+    // Fallback: only use the full assistant message if we didn't already
+    // stream via stream_event deltas (which arrive first and are preferred)
     for (const block of msg.message.content) {
       if (block.type === "tool_use" && block.name) {
         const inputStr = block.input ? JSON.stringify(block.input) : "";
         const toolLabel = formatToolSummary(block.name, inputStr);
         toolCallsSummary.push(toolLabel);
         currentRes.write(sseChunk(toolLabel, currentModel));
-        hasStreamedText = true;
-      } else if (block.type === "tool_result" && block.text) {
-        // Truncate long tool results but show a preview
-        const preview = block.text.length > 200 ? block.text.slice(0, 200) + "…" : block.text;
-        currentRes.write(sseChunk(`\n> ${preview}\n\n`, currentModel));
         hasStreamedText = true;
       } else if (block.type === "text" && block.text) {
         currentRes.write(sseChunk(String(block.text), currentModel));
